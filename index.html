@@ -183,6 +183,109 @@ async function saveFile(name,data,mime){
     const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.rel='noopener';
     document.body.appendChild(a);a.click();setTimeout(()=>{a.remove();URL.revokeObjectURL(url);},5000);return true;
   }catch(e){if(e&&e.code==='declined')return false;toast('Não foi possível salvar o arquivo.');return false;}}
+function backupPayload(){const months={};Object.keys(S.m).forEach(r=>{months[r]=S.m[r];});
+  return {app:'financas-casa',v:1,savedAt:new Date().toISOString(),cfg:S.cfg,months};}
+function validBackup(j){return !!(j&&j.app==='financas-casa'&&j.cfg&&j.months&&Array.isArray(j.cfg.accounts)&&Array.isArray(j.cfg.groups)&&Array.isArray(j.cfg.categories));}
+async function snapshot(label,kind,coalesce){
+  try{await Snap.add(kind,label,allTx().length,JSON.stringify(backupPayload()),!!coalesce);return true;}
+  catch(e){Snap.off=true;return false;}}
+const stamp=()=>{const d=new Date();return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'-'+pad(d.getHours())+pad(d.getMinutes());};
+async function downloadAuto(){
+  const ok=await saveFile('financas-backup-auto-'+stamp()+'.json',JSON.stringify(backupPayload()),'application/json');
+  if(ok){PREFS.lastFile=Date.now();savePrefs();}return ok;}
+let catTimer=null;
+/* Chamado depois de importar (kind 'imp') ou categorizar (kind 'cat'). Sempre guarda uma cópia no app;
+   baixa o arquivo conforme a preferência. Categorizações em sequência viram uma cópia só e um arquivo só (no máx. 1 a cada 10 min). */
+/* ---------- pasta de backup fora de Downloads (File System Access API) ---------- */
+const KV={db:null,
+  open(){if(this.db)return Promise.resolve(this.db);
+    return new Promise((res,rej)=>{if(!window.indexedDB){rej(new Error('sem IndexedDB'));return;}
+      const r=indexedDB.open('financas-pasta',1);r.onupgradeneeded=()=>{r.result.createObjectStore('h');};
+      r.onsuccess=()=>{this.db=r.result;res(r.result);};r.onerror=()=>rej(r.error);});},
+  async get(k){const db=await this.open();return new Promise((res,rej)=>{const q=db.transaction('h').objectStore('h').get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});},
+  async set(k,v){const db=await this.open();return new Promise((res,rej)=>{const t=db.transaction('h','readwrite');t.objectStore('h').put(v,k);t.oncomplete=()=>res();t.onerror=()=>rej(t.error);});},
+  async del(k){const db=await this.open();return new Promise((res,rej)=>{const t=db.transaction('h','readwrite');t.objectStore('h').delete(k);t.oncomplete=()=>res();t.onerror=()=>rej(t.error);});}
+};
+const DIRNAME='FinancasDaCasa',DIRFILE='financas-backup.json',DIRPREV='financas-backup-anterior.json';
+const Dir={handle:null,state:'none',err:'',q:Promise.resolve(),
+  supported(){return typeof window.showDirectoryPicker==='function';},
+  async init(){if(!this.supported()){this.state='unsupported';return;}
+    try{const h=await KV.get('dir');if(h){this.handle=h;const p=await h.queryPermission({mode:'readwrite'});this.state=p==='granted'?'ok':'perm';}}
+    catch(e){this.state=this.handle?'perm':'none';}}
+};
+const countTx=j=>Object.values((j&&j.months)||{}).reduce((a,m)=>a+m.length,0);
+async function dirPerm(){const h=Dir.handle;if(!h)return false;
+  let p=await h.queryPermission({mode:'readwrite'});
+  if(p!=='granted'){try{p=await h.requestPermission({mode:'readwrite'});}catch(e){p='denied';}}
+  if(p==='granted'&&Dir.state==='perm')Dir.state='ok';return p==='granted';}
+async function folderRead(){ /* lê o backup que já está na pasta (ou null) */
+  try{if(!(await dirPerm()))return null;const sub=await Dir.handle.getDirectoryHandle(DIRNAME);const fh=await sub.getFileHandle(DIRFILE);
+    const j=JSON.parse(await (await fh.getFile()).text());return validBackup(j)?{j}:null;}catch(e){return null;}}
+/* Grava o backup na pasta, sobrescrevendo o arquivo anterior. Guarda 1 geração anterior e nunca troca um backup com dados por um app vazio. */
+async function folderWrite(){
+  if(!Dir.handle)return 'none';
+  const run=async()=>{
+    try{
+      if(!(await dirPerm())){Dir.state='perm';return 'perm';}
+      const sub=await Dir.handle.getDirectoryHandle(DIRNAME,{create:true});
+      let oldTxt=null,oldJ=null;
+      try{const fh=await sub.getFileHandle(DIRFILE);oldTxt=await (await fh.getFile()).text();try{const o=JSON.parse(oldTxt);if(validBackup(o))oldJ=o;}catch(e){}}catch(e){}
+      if(oldJ&&allTx().length===0&&countTx(oldJ)>0){Dir.state='guard';return 'guard';}
+      if(oldTxt){const fa=await sub.getFileHandle(DIRPREV,{create:true});const wa=await fa.createWritable();await wa.write(oldTxt);await wa.close();}
+      const fh=await sub.getFileHandle(DIRFILE,{create:true});const w=await fh.createWritable();await w.write(JSON.stringify(backupPayload()));await w.close();
+      PREFS.folderLast=Date.now();savePrefs();Dir.state='ok';return 'ok';
+    }catch(e){Dir.state='error';Dir.err=(e&&e.name)||'erro';return 'error';}};
+  const r=Dir.q.then(run,run);Dir.q=r.catch(()=>{});const res=await r;refreshMais();return res;}
+const folderMsg=r=>r==='ok'?'Backup salvo na pasta.':r==='perm'?'Autorize a pasta de backup em Mais.':r==='guard'?'Backup da pasta NÃO foi sobrescrito: o app está vazio e a pasta tem dados. Veja em Mais.':r==='error'?'Não consegui gravar na pasta de backup.':'';
+const bkMsg=r=>r==='pasta'?' · backup na pasta':r==='download'?' · backup baixado':r==='perm'?' · autorize a pasta de backup (Mais)':r==='guard'?' · backup da pasta não sobrescrito (Mais)':r==='error'?' · falha no backup da pasta':'';
+async function chooseDir(){
+  if(!Dir.supported()){toast('Este navegador não permite escolher pasta. Use Exportar backup.');return;}
+  let h;try{h=await window.showDirectoryPicker({id:'financas-backup',mode:'readwrite',startIn:'documents'});}
+  catch(e){if(!e||e.name!=='AbortError')toast('Não foi possível abrir o seletor de pastas.');return;}
+  Dir.handle=h;Dir.state='ok';try{await KV.set('dir',h);}catch(e){toast('Não consegui lembrar a pasta escolhida; será preciso escolher de novo ao reabrir.');}
+  const ex=await folderRead();const mine=allTx().length;
+  if(ex&&countTx(ex.j)>0&&(mine===0||countTx(ex.j)!==mine)){folderDecide(ex.j,mine);return;}
+  const r=await folderWrite();toast(r==='ok'?'Pasta de backup configurada. Backup salvo.':folderMsg(r));render();}
+function folderDecide(j,mine){const fdt=new Date(j.savedAt||Date.now()).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  sheet('Já existe um backup nesta pasta','<p class="lead">A pasta tem um backup de '+esc(fdt)+' com <b>'+countTx(j)+' lançamentos</b>. O app tem <b>'+mine+'</b> agora.</p><div class="btns" style="flex-direction:column"><button class="btn" id="fd-rest">Restaurar o backup da pasta</button>'+(mine>0?'<button class="btn ghost" id="fd-over">Sobrescrever com os dados do app</button>':'')+'<button class="btn ghost" id="fd-no">Cancelar e não usar esta pasta</button></div>'+(mine>0?'<p class="hint">Ao sobrescrever, o backup antigo fica guardado em <b>financas-backup-anterior.json</b> (uma geração).</p>':''),b=>{
+    $('#fd-rest',b).onclick=async()=>{closeSheet();await applyRestore(j);};
+    const o=$('#fd-over',b);if(o)o.onclick=async()=>{closeSheet();const r=await folderWrite();toast(r==='ok'?'Backup da pasta atualizado.':folderMsg(r));render();};
+    $('#fd-no',b).onclick=async()=>{closeSheet();Dir.handle=null;Dir.state='none';try{await KV.del('dir');}catch(e){}render();};});}
+async function exportBackup(){const json=JSON.stringify(backupPayload());const name='financas-backup-'+todayISO()+'.json';
+  if(typeof window.showSaveFilePicker==='function'){
+    try{const fh=await window.showSaveFilePicker({suggestedName:name,startIn:'documents',types:[{description:'Backup Finanças da Casa',accept:{'application/json':['.json']}}]});
+      const w=await fh.createWritable();await w.write(json);await w.close();toast('Backup exportado.');return;}
+    catch(e){if(e&&e.name==='AbortError')return;}}
+  if(await saveFile(name,json,'application/json'))toast('Backup exportado (pasta Downloads).');}
+const canShareFiles=()=>{try{return typeof navigator.canShare==='function'&&typeof navigator.share==='function'&&navigator.canShare({files:[new File(['{}'],'a.json',{type:'application/json'})]});}catch(e){return false;}};
+async function shareBackup(){const file=new File([JSON.stringify(backupPayload())],'financas-backup-'+todayISO()+'.json',{type:'application/json'});
+  try{await navigator.share({files:[file],title:'Backup Finanças da Casa'});}catch(e){if(!e||e.name!=='AbortError')toast('Não foi possível compartilhar.');}}
+async function importBackupFile(f){let j;try{j=JSON.parse(await readText(f));}catch(x){toast('Arquivo inválido.');return;}
+  if(!validBackup(j)){toast('Esse arquivo não é um backup deste app.');return;}
+  ask('Restaurar backup','Isso substitui todos os dados atuais por '+countTx(j)+' lançamentos do arquivo. O estado atual é guardado antes numa cópia. Continuar?','Restaurar',()=>applyRestore(j));}
+function backupBlock(){
+  const fdt=ts=>new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  let h='<section class="pad" style="padding-bottom:6px"><h2 style="font-size:17px;margin-bottom:10px">Backup</h2><div class="btns" style="margin:0 0 12px"><button class="btn" data-act="mexp">Exportar backup</button><button class="btn ghost" data-act="mimp">Importar backup</button></div><input type="file" id="m-imp" accept=".json,application/json" hidden>';
+  const share=canShareFiles()?'<button class="btn ghost sm" data-act="mshare">Compartilhar backup</button>':'';
+  if(!Dir.supported()){h+='<p class="hint" style="margin:0 0 8px">Este navegador não permite escolher uma pasta para o backup automático. Depois de importar ou categorizar, use <b>Exportar backup</b>'+(share?' ou <b>Compartilhar</b>':'')+' e guarde o arquivo fora do app.</p>'+(share?'<div class="btns" style="margin:0">'+share+'</div>':'');}
+  else if(!Dir.handle){h+='<p class="hint" style="margin:0 0 8px"><b>Pasta de backup automático:</b> nenhuma escolhida. Escolha uma pasta (por exemplo, Documentos). O app cria a subpasta <b>'+DIRNAME+'</b> e mantém nela o arquivo <b>'+DIRFILE+'</b>, atualizado a cada importação e categorização. Se o Chrome for limpo ou você trocar de celular, é só levar esse arquivo.</p><div class="btns" style="margin:0"><button class="btn sm" data-act="choosedir">Escolher pasta de backup</button>'+share+'</div>';}
+  else{const st=Dir.state;
+    h+='<p class="hint" style="margin:0 0 8px"><b>Pasta de backup automático:</b> '+esc(Dir.handle.name||'(sem nome)')+'/'+DIRNAME+'. ';
+    if(st==='ok')h+='Último backup: '+(PREFS.folderLast?fdt(PREFS.folderLast):'ainda não')+'.';
+    else if(st==='perm')h+='O Chrome pede que você autorize de novo o acesso à pasta (acontece quando o Chrome é reaberto). Toque em Autorizar.';
+    else if(st==='guard')h+='<b>Atenção:</b> o app está sem lançamentos e a pasta já tem um backup com dados. Para não perder esse backup, não sobrescrevi. Restaure o backup da pasta.';
+    else if(st==='error')h+='Não consegui gravar ('+esc(Dir.err)+'). Escolha a pasta de novo.';
+    h+='</p><div class="btns" style="margin:0">'+(st==='perm'||st==='error'?'<button class="btn sm" data-act="dirnow">Autorizar e salvar agora</button>':st==='guard'?'':'<button class="btn sm" data-act="dirnow">Salvar agora</button>')+'<button class="btn ghost sm" data-act="dirrestore">Restaurar desta pasta</button><button class="btn ghost sm" data-act="choosedir">Trocar pasta</button><button class="btn ghost sm" data-act="dirforget">Parar de usar</button>'+share+'</div>';}
+  return h+'</section>';}
+async function afterChange(kind,label){
+  await snapshot(label,kind,kind==='cat');
+  let out='';
+  if(Dir.handle){const r=await folderWrite();out=r==='ok'?'pasta':r;if(kind==='cat')toast(r==='ok'?'Backup atualizado na pasta.':folderMsg(r));}
+  if(PREFS.autoFile!=='off'){
+    if(kind==='imp'){if(await downloadAuto()&&out!=='pasta')out='download';}
+    else if(kind==='cat'&&PREFS.autoFile==='imp+cat'){clearTimeout(catTimer);
+      catTimer=setTimeout(async()=>{if(Date.now()-PREFS.lastFile<600000)return;if(await downloadAuto())toast('Backup automático salvo em Downloads.');},3500);}}
+  return out;}
 function toast(msg){const el=$('#toast');el.textContent=msg;el.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>el.classList.remove('on'),3400);}
 
 /* ---------- armazenamento ---------- */
@@ -206,6 +309,28 @@ const Store={col:null,mode:'local',q:{},mem:false,memData:{},
     this.q[k]=p;return p;}
 };
 const PWA={offline:null,persisted:null,installEvt:null};
+const PREFS={autoFile:'imp+cat',lastFile:0};
+const savePrefs=()=>Store.save('prefs',PREFS);
+/* Cópias automáticas dentro do app (IndexedDB, compactadas quando o navegador permite). Guarda as 20 mais recentes. */
+const Snap={db:null,off:false,keep:20,
+  open(){if(this.db)return Promise.resolve(this.db);
+    return new Promise((res,rej)=>{if(!window.indexedDB){rej(new Error('sem IndexedDB'));return;}
+      const r=indexedDB.open('financas-copias',1);r.onupgradeneeded=()=>{r.result.createObjectStore('s',{keyPath:'id'});};
+      r.onsuccess=()=>{this.db=r.result;res(r.result);};r.onerror=()=>rej(r.error);});},
+  async tx(mode,fn){const db=await this.open();
+    return new Promise((res,rej)=>{const t=db.transaction('s',mode);let out;try{out=fn(t.objectStore('s'));}catch(e){rej(e);return;}
+      t.oncomplete=()=>res(out&&out.result!==undefined?out.result:out);t.onerror=()=>rej(t.error);t.onabort=()=>rej(t.error);});},
+  async pack(json){try{if(window.CompressionStream){const b=await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).blob();return {enc:'gz',data:b};}}catch(e){}return {enc:'raw',data:json};},
+  async unpack(rec){if(rec.enc==='gz')return await new Response(new Blob([rec.data]).stream().pipeThrough(new DecompressionStream('gzip'))).text();return rec.data;},
+  async list(){const r=await this.tx('readonly',st=>st.getAll());return (r||[]).sort((a,b)=>b.ts-a.ts);},
+  async get(id){return this.tx('readonly',st=>st.get(id));},
+  async add(kind,label,n,json,coalesce){
+    const p=await this.pack(json);const all=await this.list();const ts=Date.now();let id=uid(),cnt=1;
+    if(coalesce&&all[0]&&all[0].kind===kind&&ts-all[0].ts<90000){id=all[0].id;cnt=(all[0].cnt||1)+1;if(cnt>1)label='Categorizações seguidas ('+cnt+')';}
+    await this.tx('readwrite',st=>st.put({id,ts,kind,label,n,cnt,enc:p.enc,data:p.data}));
+    const extra=(await this.list()).slice(this.keep).map(x=>x.id);
+    if(extra.length)await this.tx('readwrite',st=>{extra.forEach(i=>st.delete(i));});}
+};
 
 /* ---------- dados padrão ---------- */
 const COLORS=['#1F4FD8','#0F8A5F','#C0275A','#B7791F','#6B46C1','#0E7490','#C2410C','#4D7C0F','#9D174D','#475569','#0F766E','#7C3AED'];
@@ -314,12 +439,14 @@ async function startImport(file){const accId=$('#imp-acc').value;S.impAcc=accId;
   }catch(e){toast('Não consegui ler esse arquivo.');}}
 async function doImport(){const I=S.imp;const acc=S.acc[I.acc];const list=I.items.filter(x=>x.keep);
   if(!list.length){toast('Nenhum lançamento selecionado.');return;}
+  await snapshot('Antes de importar '+I.name,'pre');
   const useRef=acc.type==='card'&&acc.by!=='purchase'&&I.ref;const touched=new Set();let semCat=0;
   list.forEach(it=>{const r=useRef?I.ref:it.d.slice(0,7);if(!it.c)semCat++;
     (S.m[r]=S.m[r]||[]).push({i:uid(),d:it.d,s:it.s,v:it.v,a:I.acc,c:it.c||'',r,n:'',h:it.h});touched.add(r);});
   const refs=[...touched].sort();for(const r of refs)await saveMonth(r);
+  const bk=await afterChange('imp','Importação de '+I.name+' ('+list.length+' lançamentos)');
   const dups=I.items.length-list.length;S.imp=null;S.ref=refs[refs.length-1];S.f={q:'',acc:'',cat:semCat?'_none':'',all:false};S.tab='lanc';render();
-  toast(list.length+' importados'+(dups?' · '+dups+' ignorados':'')+(semCat?' · '+semCat+' sem categoria':''));}
+  toast(list.length+' importados'+(dups?' · '+dups+' ignorados':'')+(semCat?' · '+semCat+' sem categoria':'')+bkMsg(bk));}
 
 /* ---------- componentes de UI ---------- */
 function catOptions(sel,none){let h=none===false?'':'<option value="">Sem categoria</option>';
@@ -350,6 +477,8 @@ function viewResumo(){
   let h='<section class="ledger"><div class="lg-row"><div><span class="lbl">Entradas</span><b class="in">'+money(c.inc)+'</b></div><div><span class="lbl">Saídas</span><b class="out">'+money(c.exp)+'</b></div></div>'
     +'<div class="meter" role="img" aria-label="Saídas equivalem a '+Math.round(pct)+'% das entradas"><i style="width:'+pct+'%"></i></div>'
     +'<div class="lg-bal"><span class="lbl">Saldo do mês</span><strong class="'+(bal<0?'out':'in')+'">'+money(bal)+'</strong></div></section>';
+  if(Dir.state==='perm'||Dir.state==='guard'||Dir.state==='error')h+='<button class="alert" data-act="dirfix"><span>'+(Dir.state==='perm'?'Backup na pasta: autorização necessária':Dir.state==='guard'?'Backup da pasta não foi sobrescrito (app vazio)':'Falha ao gravar o backup na pasta')+'</span><b>'+(Dir.state==='guard'?'Ver':'Autorizar')+'</b></button>';
+  else if(Dir.supported()&&!Dir.handle&&allTx().length>0)h+='<button class="alert" data-act="choosedir"><span>Escolha uma pasta para o backup automático</span><b>Escolher</b></button>';
   const unc=c.list.filter(t=>!t.c&&classify(t)!=='ignore').length;
   if(unc)h+='<button class="alert" data-act="uncat"><span><b>'+unc+'</b> lançamento'+(unc>1?'s':'')+' sem categoria</span><b>Categorizar</b></button>';
   const gids=Object.keys(c.byG).sort((a,b)=>c.byG[b].tot-c.byG[a].tot);
@@ -432,10 +561,10 @@ function viewContas(){
   return h;}
 
 function viewMais(){
-  return '<div class="menu" style="margin-top:14px">'+(PWA.installEvt?'<button data-act="install"><span>Instalar app na tela inicial</span><span>›</span></button>':'')+'<button data-act="report"><span>Relatórios em PDF</span><span>›</span></button><button data-act="cats"><span>Categorias e grupos</span><span>›</span></button><button data-act="rules"><span>Regras de categorização automática</span><span>›</span></button><button data-act="backup"><span>Backup e restauração</span><span>›</span></button></div>'
+  return backupBlock()+'<div class="menu" style="margin-top:14px">'+(PWA.installEvt?'<button data-act="install"><span>Instalar app na tela inicial</span><span>›</span></button>':'')+'<button data-act="report"><span>Relatórios em PDF</span><span>›</span></button><button data-act="cats"><span>Categorias e grupos</span><span>›</span></button><button data-act="rules"><span>Regras de categorização automática</span><span>›</span></button><button data-act="backup"><span>Cópias no app, CSV e backup em Downloads</span><span>›</span></button></div>'
     +pwaStatus();}
 function pwaStatus(){const l=[];
-  l.push(Store.mode==='cloud'?'Seus dados ficam salvos na sua conta, privados, e aparecem em qualquer aparelho em que você abrir este app.':(Store.mem?'<b>Atenção:</b> o navegador bloqueou o armazenamento. Os dados serão perdidos ao fechar o app. Faça backup.':'Seus dados ficam salvos só neste aparelho, dentro do app. Baixe um backup de vez em quando (Mais, Backup e restauração).'));
+  l.push(Store.mode==='cloud'?'Seus dados ficam salvos na sua conta, privados, e aparecem em qualquer aparelho em que você abrir este app.':(Store.mem?'<b>Atenção:</b> o navegador bloqueou o armazenamento. Os dados serão perdidos ao fechar o app. Faça backup.':'Seus dados ficam salvos só neste aparelho, dentro do app. Exporte um backup de vez em quando (botão Exportar backup).'));
   if(Store.mode!=='cloud'){
     if('serviceWorker' in navigator)l.push(PWA.offline===true?'Uso offline: pronto.':PWA.offline===false?'Uso offline: ainda não está pronto. Abra o app com internet e aguarde alguns segundos.':'Uso offline: verificando...');
     else l.push('Uso offline: este navegador não oferece suporte.');
@@ -485,7 +614,8 @@ function openTx(id){if(!S.cfg.accounts.length){toast('Cadastre uma conta ou cart
       const t={i:old?old.i:uid(),d,s,v:val,a,c,r,n:$('#f-n',b).value.trim(),h:old?old.h:nextH(a+'|'+d+'|'+Math.round(val*100)+'|'+norm2(s))};
       const oldRef=old?old.r:null;const doRule=!$('#rulebox',b).hidden&&$('#f-rule',b).checked&&c;const kw=$('#f-k',b).value;
       closeSheet();await putTx(t,oldRef);let n=0;if(doRule)n=await addRule(kw,c);
-      render();toast(n?'Salvo. '+n+' lançamentos parecidos categorizados.':'Salvo.');};
+      render();toast(n?'Salvo. '+n+' lançamentos parecidos categorizados.':'Salvo.');
+      if((old&&c&&old.c!==c)||n)afterChange('cat','Categoria de "'+s.slice(0,28)+'"'+(n?' e mais '+n:''));};
     if(old)$('#f-del',b).onclick=()=>ask('Excluir lançamento','Excluir "'+old.s+'"? Isso não pode ser desfeito.','Excluir',async()=>{await delTx(old);render();toast('Excluído.');});
   });}
 
@@ -532,7 +662,7 @@ function pickCat(it){const html='<input id="pk-q" type="search" placeholder="Bus
 async function applyPick(it,c,b){const I=S.imp;const doRule=!$('#pk-rule',b).hidden&&$('#pk-chk',b).checked&&c;const kw=$('#pk-k',b).value;
   const ns=norm2(it.s);I.items.forEach(x=>{if(x===it||(!x.c&&norm2(x.s)===ns))x.c=c;});
   closeSheet();
-  if(doRule){const k=norm2(kw);if(k){await addRule(k,c);I.items.forEach(x=>{if(!x.c&&norm2(x.s).includes(k))x.c=c;});}}
+  if(doRule){const k=norm2(kw);if(k){const n=await addRule(k,c);I.items.forEach(x=>{if(!x.c&&norm2(x.s).includes(k))x.c=c;});if(n)afterChange('cat','Regra "'+k+'" ('+n+' lançamentos)');}}
   render();}
 
 function openCats(){const rows=()=>S.cfg.groups.map(g=>{const cs=S.cfg.categories.filter(c=>c.g===g.id);
@@ -556,22 +686,40 @@ function editGroup(id){const old=id?S.grp[id]:null;
 
 function openRules(){const draw=()=>S.cfg.rules.slice().sort((a,b)=>a.k<b.k?-1:1).map(r=>'<div class="rw"><span>contém <b>'+esc(r.k)+'</b><small>'+esc((S.cat[r.c]||{name:'?'}).name)+'</small></span><button class="btn ghost sm" data-r="'+r.id+'" aria-label="Excluir regra">Excluir</button></div>').join('')||'<div class="empty">Nenhuma regra ainda.</div>';
   sheet('Regras automáticas','<p class="hint" style="margin-top:0">Quando a descrição de um lançamento importado contém a palavra-chave, a categoria é preenchida sozinha.</p><label>Palavra-chave<input id="r-k" placeholder="Ex.: uber"></label><label>Categoria<select id="r-c">'+catOptions('',false)+'</select></label><div class="btns" style="margin:0 0 14px"><button class="btn" id="r-add">Adicionar regra</button></div><div class="panel" id="r-list" style="border-radius:12px;border:1px solid var(--ln)">'+draw()+'</div>',b=>{
-    $('#r-add',b).onclick=async()=>{const k=$('#r-k',b).value;if(!norm2(k)){toast('Digite a palavra-chave.');return;}const n=await addRule(k,$('#r-c',b).value);$('#r-k',b).value='';$('#r-list',b).innerHTML=draw();render();toast(n?n+' lançamentos categorizados.':'Regra salva.');};
+    $('#r-add',b).onclick=async()=>{const k=$('#r-k',b).value;if(!norm2(k)){toast('Digite a palavra-chave.');return;}const n=await addRule(k,$('#r-c',b).value);$('#r-k',b).value='';$('#r-list',b).innerHTML=draw();render();toast(n?n+' lançamentos categorizados.':'Regra salva.');if(n)afterChange('cat','Regra "'+norm2(k)+'" ('+n+' lançamentos)');};
     $('#r-list',b).onclick=async e=>{const x=e.target.closest('[data-r]');if(!x)return;S.cfg.rules=S.cfg.rules.filter(r=>r.id!==x.dataset.r);await saveCfg();$('#r-list',b).innerHTML=draw();};});}
 
+async function applyRestore(j){
+  await snapshot('Antes de restaurar um backup','pre');
+  const oldRefs=S.cfg.refs.slice();S.cfg=j.cfg;S.cfg.refs=Object.keys(j.months).sort();S.cfg.rules=S.cfg.rules||[];S.m={};
+  for(const r of S.cfg.refs){S.m[r]=j.months[r];await Store.save('m-'+r,{tx:S.m[r]});}
+  for(const r of oldRefs)if(!S.m[r])await Store.save('m-'+r,{tx:[]});
+  idx();await saveCfg();render();toast('Backup restaurado.');
+  if(Dir.handle){const r=await folderWrite();toast(r==='ok'?'Backup restaurado e pasta atualizada.':(folderMsg(r)||'Backup restaurado.'));}}
 function openBackup(){
-  sheet('Backup e restauração','<p class="lead">Baixe uma cópia de todos os seus dados (contas, categorias, regras e lançamentos).</p><div class="btns" style="margin:0 0 20px"><button class="btn" id="b-exp">Baixar backup</button><button class="btn ghost" id="b-csv">Baixar lançamentos (CSV)</button></div><label>Restaurar a partir de um backup (substitui os dados atuais)</label><label class="filebtn" style="margin-top:0">Escolher arquivo de backup<input type="file" id="b-file" accept=".json,application/json"></label>',b=>{
+  const fdt=ts=>new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  sheet('Backup e restauração','<p class="lead">Baixe uma cópia de todos os seus dados (contas, categorias, regras e lançamentos).</p><div class="btns" style="margin:0 0 20px"><button class="btn" id="b-exp">Baixar backup</button><button class="btn ghost" id="b-csv">Baixar lançamentos (CSV)</button></div>'
+    +'<h3 style="font-size:16px;margin:4px 0 8px">Backup automático</h3><label>Arquivo na pasta Downloads<select id="ab-mode"><option value="imp+cat">Depois de importar e de categorizar</option><option value="imp">Só depois de importar</option><option value="off">Não baixar arquivos</option></select></label><p class="hint" id="ab-info" style="margin:-4px 0 18px"></p>'
+    +'<h3 style="font-size:16px;margin:4px 0 6px">Cópias guardadas no app</h3><p class="hint" style="margin:0 0 8px">Uma cópia a cada importação e categorização (as 20 mais recentes). Servem para desfazer erros. Ficam no mesmo armazenamento do app: se você limpar os dados do Chrome ou desinstalar o app, somem junto. Para trocar de aparelho ou de endereço, use o arquivo.</p><div class="panel" id="ab-list" style="border-radius:12px;border:1px solid var(--ln);margin-bottom:20px"><div class="rw neutral">Carregando...</div></div>'
+    +'<label>Restaurar a partir de um arquivo de backup (substitui os dados atuais)</label><label class="filebtn" style="margin-top:0">Escolher arquivo de backup<input type="file" id="b-file" accept=".json,application/json"></label>',b=>{
     const dl=(name,data)=>saveFile(name,data,/\.json$/.test(name)?'application/json':'text/csv;charset=utf-8');
-    $('#b-exp',b).onclick=()=>{const months={};Object.keys(S.m).forEach(r=>months[r]=S.m[r]);dl('financas-backup-'+todayISO()+'.json',JSON.stringify({app:'financas-casa',v:1,cfg:S.cfg,months}));};
+    $('#b-exp',b).onclick=()=>{dl('financas-backup-'+todayISO()+'.json',JSON.stringify(backupPayload()));};
     $('#b-csv',b).onclick=()=>{const q=v=>'"'+String(v).replace(/"/g,'""')+'"';const rows=[['Data','Descrição','Valor','Conta','Categoria','Mês de competência','Observação'].map(q).join(';')];
       allTx().sort((a,c)=>a.d<c.d?-1:1).forEach(t=>rows.push([t.d,t.s,String(t.v).replace('.',','),(S.acc[t.a]||{}).name||'',(S.cat[t.c]||{}).name||'',t.r,t.n||''].map(q).join(';')));dl('lancamentos-'+todayISO()+'.csv','\uFEFF'+rows.join('\n'));};
-    $('#b-file',b).onchange=async e=>{const f=e.target.files[0];if(!f)return;let j;try{j=JSON.parse(await readText(f));}catch(x){toast('Arquivo inválido.');return;}
-      if(!j||j.app!=='financas-casa'||!j.cfg||!j.months){toast('Esse arquivo não é um backup deste app.');return;}
-      ask('Restaurar backup','Isso substitui todos os dados atuais pelos do arquivo. Continuar?','Restaurar',async()=>{
-        const oldRefs=S.cfg.refs.slice();S.cfg=j.cfg;S.cfg.refs=Object.keys(j.months).sort();S.m={};
-        for(const r of S.cfg.refs){S.m[r]=j.months[r];await Store.save('m-'+r,{tx:S.m[r]});}
-        for(const r of oldRefs)if(!S.m[r])await Store.save('m-'+r,{tx:[]});
-        idx();await saveCfg();render();toast('Backup restaurado.');});};});}
+    const info=()=>{$('#ab-info',b).textContent=(PREFS.lastFile?'Último arquivo automático: '+fdt(PREFS.lastFile)+'. ':'Nenhum arquivo automático ainda. ')+'O Chrome pode pedir permissão para baixar vários arquivos: permita, senão o arquivo automático não é salvo.';};
+    $('#ab-mode',b).value=PREFS.autoFile;info();
+    $('#ab-mode',b).onchange=e=>{PREFS.autoFile=e.target.value;savePrefs();toast('Preferência salva.');};
+    const list=$('#ab-list',b);
+    const drawList=async()=>{let items;try{items=await Snap.list();}catch(e){list.innerHTML='<div class="rw neutral">Cópias dentro do app indisponíveis neste navegador. O arquivo automático continua funcionando.</div>';return;}
+      if(!items.length){list.innerHTML='<div class="rw neutral">Nenhuma cópia ainda. A primeira é criada na próxima importação ou categorização.</div>';return;}
+      list.innerHTML=items.map(x=>'<div class="rw"><span><b style="font-weight:500">'+esc(x.label)+'</b><small>'+fdt(x.ts)+' · '+x.n+' lançamentos</small></span><span style="display:flex;gap:6px"><button class="btn ghost sm" data-s="'+x.id+'" data-a="dl">Baixar</button><button class="btn ghost sm" data-s="'+x.id+'" data-a="rs">Restaurar</button></span></div>').join('');};
+    drawList();
+    list.onclick=async e=>{const btn=e.target.closest('[data-s]');if(!btn)return;let rec,j;
+      try{rec=await Snap.get(btn.dataset.s);j=JSON.parse(await Snap.unpack(rec));}catch(x){toast('Não consegui abrir essa cópia.');return;}
+      if(!validBackup(j)){toast('Essa cópia está inválida.');return;}
+      if(btn.dataset.a==='dl'){dl('financas-copia-'+new Date(rec.ts).toISOString().slice(0,16).replace(/[-:T]/g,'')+'.json',JSON.stringify(j));return;}
+      ask('Restaurar cópia','Voltar os dados ao estado de '+fdt(rec.ts)+' ('+rec.label+')? O estado atual é guardado antes numa cópia, então dá para desfazer.','Restaurar',()=>applyRestore(j));};
+    $('#b-file',b).onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)importBackupFile(f);};});}
 
 /* ---------- leitura de PDF ---------- */
 let PDFJS=null;
@@ -738,6 +886,14 @@ document.addEventListener('click',e=>{const a=e.target.closest('[data-act]');if(
     case 'flip':{const it=S.imp.items[+a.dataset.i];it.v=-it.v;const y=window.scrollY;render();window.scrollTo(0,y);break;}
     case 'report':openReport();break;
     case 'install':if(PWA.installEvt){PWA.installEvt.prompt();PWA.installEvt=null;}break;
+    case 'mexp':exportBackup();break;
+    case 'mimp':{const i=$('#m-imp');if(i)i.click();break;}
+    case 'mshare':shareBackup();break;
+    case 'choosedir':chooseDir();break;
+    case 'dirnow':(async()=>{const r=await folderWrite();toast(r==='ok'?'Backup salvo na pasta.':folderMsg(r));render();})();break;
+    case 'dirfix':if(Dir.state==='guard'){S.tab='mais';render();}else{(async()=>{const r=await folderWrite();toast(r==='ok'?'Backup salvo na pasta.':folderMsg(r));render();})();}break;
+    case 'dirrestore':(async()=>{const ex=await folderRead();if(!ex){toast('Não encontrei um backup válido nesta pasta.');return;}ask('Restaurar da pasta','Restaurar o backup com '+countTx(ex.j)+' lançamentos? O estado atual é guardado antes numa cópia.','Restaurar',()=>applyRestore(ex.j));})();break;
+    case 'dirforget':(async()=>{Dir.handle=null;Dir.state='none';try{await KV.del('dir');}catch(e){}render();toast('Pasta de backup desativada.');})();break;
     case 'impcancel':S.imp=null;render();break;
     case 'impconfirm':doImport();break;
   }});
@@ -747,6 +903,7 @@ document.addEventListener('change',e=>{const t=e.target;const I=S.imp;
   else if(t.id==='f-cat'){S.f.cat=t.value;renderTxList();}
   else if(t.id==='imp-file'){if(t.files[0])startImport(t.files[0]);}
   else if(t.id==='imp-acc'){S.impAcc=t.value;}
+  else if(t.id==='m-imp'){const f=t.files[0];t.value='';if(f)importBackupFile(f);}
   else if(I&&['imp-d','imp-s','imp-v','imp-x','imp-sign','imp-ref'].includes(t.id)){
     if(t.id==='imp-sign')I.sign=t.value;else if(t.id==='imp-ref')I.ref=t.value;
     else I.map[t.id.slice(4)]=parseInt(t.value,10);
@@ -761,6 +918,8 @@ async function boot(){
   try{await Store.init();const c=await Store.load('config');if(!c.ok){fatal();return;}
     if(c.data){S.cfg=c.data;}else{S.cfg=seed();await saveCfg();}
     S.cfg.refs=S.cfg.refs||[];S.cfg.rules=S.cfg.rules||[];idx();
+    {const pr=await Store.load('prefs');if(pr.ok&&pr.data)Object.assign(PREFS,pr.data);else if(typeof window.showDirectoryPicker==='function')PREFS.autoFile='off';}
+    try{await Dir.init();}catch(e){}
     const refs=S.cfg.refs.slice();
     for(let i=0;i<refs.length;i+=4){const res=await Promise.all(refs.slice(i,i+4).map(r=>Store.load('m-'+r)));
       for(let j=0;j<res.length;j++){if(!res[j].ok){fatal();return;}S.m[refs[i+j]]=(res[j].data&&res[j].data.tx)||[];}}

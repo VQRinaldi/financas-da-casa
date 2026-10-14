@@ -2,7 +2,7 @@
    Guarda todos os arquivos do app para uso offline. Todos os caminhos são relativos
    à pasta onde este arquivo está (funciona em subdiretório, como no GitHub Pages).
    Para forçar a troca de versão, mude o número em VERSION. */
-const VERSION = 'v1';
+const VERSION = 'v3';
 const CACHE = 'financas-casa-' + VERSION;
 const ASSETS = [
   './',

@@ -75,6 +75,25 @@ Em **Importar**, escolha a conta ou o cartão e o arquivo PDF. O app lê o texto
 - Cada banco usa um layout. A leitura é uma aproximação e **sempre exige conferência**. Se nenhum lançamento for reconhecido, o app mostra o texto lido, que você pode mandar ao Claude para ajustar o leitor ao seu banco.
 - **OCR não está incluído.** PDF que é só imagem (digitalizado ou foto) não tem texto para ler, e o app avisa isso. Para ler imagem offline seria preciso incluir, na mesma pasta do app, uma biblioteca de OCR (por exemplo o Tesseract.js: o script principal, o worker, o núcleo WebAssembly e o arquivo de idioma `por.traineddata`, somando algumas dezenas de MB) e acrescentar o código que transforma cada página em imagem e roda o reconhecimento. Eu não tinha internet para baixar esses arquivos, então não incluí. Prefira baixar o **CSV ou OFX** no banco, que são mais precisos.
 
+## Backup automático (pasta fora de Downloads)
+
+**Configurar uma vez:** em **Mais**, toque em **Escolher pasta de backup** e escolha uma pasta (por exemplo, **Documentos**; o Android não deixa escolher a pasta Downloads nem a raiz do armazenamento). O app cria dentro dela a subpasta `FinancasDaCasa` com o arquivo `financas-backup.json`.
+
+**O que acontece depois:** a cada importação (CSV, OFX ou PDF) e a cada categorização de compra, o app **sobrescreve** o `financas-backup.json` com os dados atuais. Ele não cria arquivos novos a cada vez. Por segurança, antes de sobrescrever copia o conteúdo antigo para `financas-backup-anterior.json` (só uma geração). Se o app estiver sem nenhum lançamento e a pasta já tiver um backup com dados (por exemplo, depois de limpar o Chrome), o app **não sobrescreve**: avisa e oferece restaurar.
+
+**Autorização:** o Chrome do Android ainda não guarda a permissão de pasta entre sessões (segundo o rastreador de bugs do Chromium, em fevereiro de 2026). Depois de reabrir o Chrome pode aparecer, no Resumo, o alerta "Backup na pasta: autorização necessária". Toque em **Autorizar**, ou simplesmente importe ou categorize e aceite o pedido do Chrome. Enquanto não autorizar, nada é gravado na pasta, mas as cópias dentro do app continuam.
+
+**Trocar de celular ou depois de limpar o Chrome:**
+1. Leve a pasta `FinancasDaCasa` para o outro celular (Drive, cabo, cartão de memória...). Se for o mesmo aparelho, ela continua onde estava.
+2. Instale o app, vá em **Mais → Escolher pasta de backup** e escolha a pasta que contém `FinancasDaCasa`.
+3. O app encontra o backup e pergunta se você quer restaurar. Outra opção: **Importar backup** e escolher o arquivo `financas-backup.json`.
+
+**Exportar e importar na mão** (em **Mais**, no topo): **Exportar backup** abre o seletor de arquivos para você escolher onde salvar (se o celular não tiver esse seletor, baixa para Downloads). **Importar backup** restaura a partir de um arquivo. Quando o celular permite, há também **Compartilhar backup**, para mandar o arquivo ao Drive, WhatsApp etc.
+
+**Se o celular não permitir escolher pasta:** o app avisa em Mais e volta a baixar um arquivo `financas-backup-auto-AAAAMMDD-HHMM.json` em Downloads depois de cada importação (e, no máximo a cada 10 minutos, depois de categorizar). Nesse caso não há como sobrescrever: o Android cria um arquivo novo a cada vez. Você ajusta isso em **Mais → Cópias no app, CSV e backup em Downloads → Arquivo na pasta Downloads**.
+
+**Cópias dentro do app:** a cada importação e categorização o app também guarda, dentro dele, uma cópia (as 20 mais recentes) e uma cópia **antes** de cada importação ou restauração. Ficam em **Mais → Cópias no app, CSV e backup em Downloads**, onde você pode **Baixar** ou **Restaurar** cada uma. Servem para desfazer erros. Ficam no mesmo armazenamento dos seus dados: se limpar os dados do Chrome ou desinstalar o app, elas somem junto. Quem protege nesses casos é o arquivo na pasta.
+
 ## Segurança dos dados
 
 - Os dados ficam no armazenamento do navegador, dentro do app instalado. Eles sobrevivem a fechar o app e a reiniciar o celular.
@@ -96,12 +115,16 @@ Em **Importar**, escolha a conta ou o cartão e o arquivo PDF. O app lê o texto
 - Relatório em PDF gerado sem internet; conferi o texto com `pypdf` e o visual da primeira página.
 - Backup JSON e CSV baixados sem internet; dados apagados do navegador e restaurados pelo backup (10 lançamentos de volta, totais iguais).
 - Fechar e reabrir o navegador sem internet: o app abre e os lançamentos e contas continuam lá.
+- Backup automático: importar baixa um arquivo com os lançamentos importados; categorizar logo depois não baixa (limite de 10 minutos) e depois de 10 minutos baixa um arquivo com a categoria nova; categorizações seguidas viram uma cópia só; os três modos do seletor; a preferência continua escolhida depois de recarregar; restaurar a cópia "Antes de importar" desfaz a importação e restaurar a cópia "Antes de restaurar" traz tudo de volta; só as 20 cópias mais recentes são mantidas (testado com 26 operações); as cópias são compactadas (gzip) e continuam listadas sem internet.
+- Pasta de backup (seletor de pasta **simulado** sobre o armazenamento privado do Chromium, porque o seletor de pastas do Android não dá para automatizar): escolher a pasta cria `FinancasDaCasa/financas-backup.json`; importar CSV grava os 3 lançamentos nesse mesmo arquivo, sem baixar nada em Downloads; categorizar sobrescreve o arquivo na hora e a pasta continua com só 2 arquivos (o backup e o anterior); depois de "limpar os dados do site" (localStorage e IndexedDB) o app zera, e escolher a pasta de novo encontra o backup e restaura tudo; app vazio **não** sobrescreve um backup com dados (a proteção funcionou) e dá para restaurar da pasta; pedido de autorização de pasta (alerta no Resumo e botão Autorizar); Exportar backup usando o seletor de arquivo; Importar backup restaurando e atualizando a pasta; Compartilhar backup enviando um `.json`; "Parar de usar" para de gravar. Também testei um navegador sem seletor de pasta: o app explica, Exportar baixa o arquivo e a importação volta a baixar o backup automático em Downloads.
 
 **Apenas revisados no código, não executados:**
 
 - A instalação em um Android e Chrome reais (menu "Instalar app", ícone na tela inicial, janela sem barra), e como os ícones adaptáveis ficam no seu launcher.
 - Os passos do GitHub Pages: não tenho acesso ao GitHub, então escrevi o passo a passo de memória; nomes de botões podem diferir.
 - A troca de versão do service worker quando você publicar arquivos novos.
+- O seletor de pasta e a autorização de pasta no Chrome do Android de verdade: segundo a documentação, o Chrome Android 132 (jan/2025) ou mais novo oferece o seletor, mas não guarda a permissão entre sessões; eu não vi isso rodando num aparelho. O app foi escrito para pedir autorização de novo quando precisar.
+- No Chrome do Android: se ele bloqueia ou pede permissão para os downloads automáticos (principalmente o que sai alguns segundos depois de categorizar, que não vem direto de um toque). No Chromium de teste todos os downloads foram aceitos. Se o Chrome bloquear, as cópias dentro do app continuam sendo feitas e o botão **Baixar backup** continua funcionando.
 - PDFs reais de bancos: usei PDFs que eu mesmo gerei. PDFs com codificações incomuns podem não ser lidos (não incluí as tabelas de caracteres CMap do PDF.js).
 - O tema escuro depois da conversão, e o desempenho em celulares simples com PDFs grandes.
 - Limite de tamanho do armazenamento do navegador. O app usa `localStorage`, o armazenamento do navegador (era o modo local que o app antigo já tinha; dentro do Claude ele usava o armazenamento da sua conta). Esse armazenamento costuma ter limite de poucos MB. Para uso doméstico, dezenas de milhares de lançamentos cabem, mas não medi isso aqui.
