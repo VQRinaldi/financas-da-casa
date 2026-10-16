@@ -337,6 +337,10 @@ const COLORS=['#1F4FD8','#0F8A5F','#C0275A','#B7791F','#6B46C1','#0E7490','#C241
 const SEED_G=[['moradia','Moradia',0],['alim','Alimentação',1],['transp','Transporte',2],['saude','Saúde',3],['educ','Educação',4],['lazer','Lazer',5],['assin','Assinaturas',6],['compras','Compras',7],['taxas','Impostos e taxas',8],['outros','Outros',9],['rec','Receitas',1],['mov','Movimentações',10]];
 const SEED_C={moradia:['Aluguel / financiamento','Condomínio','Luz','Água','Gás','Internet e telefone','Manutenção da casa'],alim:['Mercado','Restaurantes','Delivery','Padaria'],transp:['Combustível','Estacionamento e pedágio','Aplicativos de transporte','Manutenção do carro','Seguro e IPVA'],saude:['Farmácia','Consultas e exames','Plano de saúde','Academia e esportes'],educ:['Cursos','Escola'],lazer:['Viagens','Cinema e shows','Hobbies'],assin:['Streaming','Apps e software'],compras:['Roupas','Casa e decoração','Eletrônicos'],taxas:['Tarifas bancárias','Juros e multas','Impostos'],outros:['Outros'],rec:['Salário','Rendimentos','Outras receitas'],mov:['Pagamento de fatura','Transferência entre contas','Investimentos']};
 const SEED_R=[['uber','Aplicativos de transporte'],['99app','Aplicativos de transporte'],['ifood','Delivery'],['rappi','Delivery'],['netflix','Streaming'],['spotify','Streaming'],['disney','Streaming'],['hbo','Streaming'],['amazon prime','Streaming'],['youtube premium','Streaming'],['shell','Combustível'],['ipiranga','Combustível'],['drogasil','Farmácia'],['droga raia','Farmácia'],['drogaria','Farmácia'],['pague menos','Farmácia'],['carrefour','Mercado'],['pao de acucar','Mercado'],['assai','Mercado'],['atacadao','Mercado'],['supermercado','Mercado'],['padaria','Padaria'],['sabesp','Água'],['cpfl','Luz'],['pagamento de fatura','Pagamento de fatura'],['pgto fatura','Pagamento de fatura'],['pagamento recebido','Pagamento de fatura'],['pagamento on line','Pagamento de fatura'],['iof','Juros e multas'],['tarifa','Tarifas bancárias'],['salario','Salário'],['rendimento','Rendimentos']];
+const SEED_R2=[['rentab invest','Rendimentos'],['juros s capital','Rendimentos'],['gastos cartao de credito','Pagamento de fatura'],['conta de agua','Água'],['conta de luz','Luz'],['conta de gas','Gás'],['estacionamento','Estacionamento e pedágio'],['sem parar','Estacionamento e pedágio'],['pedagio','Estacionamento e pedágio'],['transf saldo c sal','Salário'],['aplic invest','Investimentos'],['resgate invest','Investimentos'],['resg invest','Investimentos'],['farmacia','Farmácia'],['restaurante','Restaurantes'],['unimed','Plano de saúde'],['sulamerica','Plano de saúde'],['condominio','Condomínio'],['aluguel','Aluguel / financiamento'],['iptu','Impostos'],['ipva','Seguro e IPVA'],['smartfit','Academia e esportes'],['gasolina','Combustível']];
+function upgradeRules(){if((S.cfg.rulesV||1)>=2)return false;
+  SEED_R2.forEach(r=>{const k=norm2(r[0]);if(S.cfg.rules.some(x=>x.k===k))return;const c=S.cfg.categories.find(c=>c.name===r[1]);if(c)S.cfg.rules.push({id:uid(),k,c:c.id});});
+  S.cfg.rulesV=2;return true;}
 function seed(){const groups=[],categories=[],rules=[];
   SEED_G.forEach(g=>{groups.push({id:g[0],name:g[1],color:COLORS[g[2]%COLORS.length]});
     (SEED_C[g[0]]||[]).forEach((n,i)=>categories.push({id:'c_'+g[0]+'_'+i,name:n,g:g[0],kind:g[0]==='rec'?'income':g[0]==='mov'?'ignore':'expense'}));});
@@ -355,7 +359,10 @@ function calcRef(accId,date){const a=S.acc[accId];
   const d=+date.slice(8,10),base=date.slice(0,7);const closeM=d>a.closing?addMonths(base,1):base;
   return a.due>a.closing?closeM:addMonths(closeM,1);}
 function autoCat(desc){const n=norm2(desc);const rs=S.cfg.rules.slice().sort((a,b)=>b.k.length-a.k.length);const r=rs.find(r=>r.k&&n.includes(r.k));return r&&S.cat[r.c]?r.c:'';}
-function keyword(desc){const t=norm2(desc).split(' ').filter(w=>w.length>2&&!/\d/.test(w));return t.slice(0,2).join(' ')||norm2(desc).slice(0,20);}
+const KW_STOP=new Set(['de','da','do','das','dos','em','me','sa','ltda','eireli','epp']);
+const KW_GENERIC=new Set(['pix','enviado','recebido','pagto','pagamento','eletron','cobranca','des','rem','compra','cartao','visa','master','mastercard','transf','transferencia','debito','credito','boleto','ted','doc','tarifa','pag']);
+function keyword(desc){const all=norm2(desc).split(' ').filter(w=>w.length>=2&&!/\d/.test(w)&&!KW_STOP.has(w));const sp=all.filter(w=>!KW_GENERIC.has(w));
+  const t=(sp.length?sp:all).slice(0,sp.length&&sp.length<all.length?3:2);return t.join(' ')||norm2(desc).slice(0,20);}
 function nextH(base){const n=allTx().filter(t=>t.h&&t.h.indexOf(base+'#')===0).length+1;return base+'#'+n;}
 function saveCfg(){return Store.save('config',S.cfg);}
 async function saveMonth(ref){const list=S.m[ref]||[];await Store.save('m-'+ref,{tx:list});
@@ -419,11 +426,17 @@ function buildItems(){const I=S.imp;let items=[];
       if(m.x>=0){const x=parseAmt(r[m.x]);if(x!==null)v-=Math.abs(x);}
       if(!v)return;items.push({d,s:(m.s>=0?String(r[m.s]||'').trim():'')||'Sem descrição',v});});}}
   if(I.sign==='pos')items.forEach(it=>{it.v=-it.v;});
-  const keys=new Set(allTx().filter(t=>t.a===I.acc).map(t=>t.h));const seen={};
+  const exist=allTx().filter(t=>t.a===I.acc);const keys=new Set(exist.map(t=>t.h));const seen={};
+  const pool={};exist.forEach(t=>{const k=t.d+'|'+Math.round(t.v*100);(pool[k]=pool[k]||[]).push({n:norm2(t.s),h:t.h,used:false});});
   items.forEach(it=>{let k;
     if(it.fit)k='fit:'+I.acc+':'+it.fit;
     else{const b=I.acc+'|'+it.d+'|'+Math.round(it.v*100)+'|'+norm2(it.s);seen[b]=(seen[b]||0)+1;k=b+'#'+seen[b];}
-    it.h=k;it.dup=keys.has(k);it.keep=!it.dup;it.c=autoCat(it.s);});
+    it.h=k;it.dup=keys.has(k);
+    if(it.dup){const e=(pool[it.d+'|'+Math.round(it.v*100)]||[]).find(e=>!e.used&&e.h===k);if(e)e.used=true;}
+    it.keep=!it.dup;it.c=autoCat(it.s);});
+  items.forEach(it=>{if(it.dup)return;const nn=norm2(it.s);
+    const e=(pool[it.d+'|'+Math.round(it.v*100)]||[]).find(e=>!e.used&&(e.n.startsWith(nn)||nn.startsWith(e.n)));
+    if(e){e.used=true;it.dup=true;it.keep=false;}});
   I.items=items;}
 async function startImport(file){const accId=$('#imp-acc').value;S.impAcc=accId;const acc=S.acc[accId];
   if(/\.pdf$/i.test(file.name)||file.type==='application/pdf'){await importPdf(file,'');return;}
@@ -540,6 +553,7 @@ function viewImport(){const accs=S.cfg.accounts.filter(a=>!a.off);
   cfg+='<label>Como o arquivo marca os gastos?<select id="imp-sign"><option value="neg"'+(I.sign==='neg'?' selected':'')+'>Gastos são negativos (comum em extratos)</option><option value="pos"'+(I.sign==='pos'?' selected':'')+'>Gastos são positivos (comum em faturas)</option></select></label>';
   if(acc.type==='card'&&acc.by!=='purchase')cfg+='<label>Mês da fatura (vencimento)<input type="month" id="imp-ref" value="'+esc(I.ref)+'"></label>';
   if(I.fmt==='pdf')cfg+='<p class="hint" style="margin:0">Leitura de PDF é aproximada. Confira datas, descrições e valores abaixo. Toque no valor de um lançamento para inverter o sinal.</p>';
+  if(I.fmt==='pdf'&&I.check&&(I.check.ok+I.check.bad)>0)cfg+='<p class="hint" style="margin:6px 0 0">'+(I.check.bad===0?'<b>Conferência com a coluna Saldo do extrato:</b> todos os '+I.check.ok+' lançamentos fecham.':'<b>Conferência com a coluna Saldo:</b> '+I.check.bad+' de '+(I.check.ok+I.check.bad)+' lançamentos não fecham com o saldo. Algum lançamento pode ter ficado de fora ou com valor errado. Confira.')+'</p>';
   cfg+='</div>';
   const keep=I.items.filter(x=>x.keep);let inc=0,exp=0;keep.forEach(x=>{if(x.v>0)inc+=x.v;else exp-=x.v;});
   let h=cfg+'<div class="sum" style="padding-top:12px">'+keep.length+' de '+I.items.length+' selecionados · gastos '+money(exp)+' · entradas '+money(inc)+'</div>';
@@ -685,7 +699,9 @@ function editGroup(id){const old=id?S.grp[id]:null;
     const d=$('#g-d',b);if(d)d.onclick=async()=>{S.cfg.groups=S.cfg.groups.filter(g=>g.id!==old.id);idx();await saveCfg();render();openCats();};});}
 
 function openRules(){const draw=()=>S.cfg.rules.slice().sort((a,b)=>a.k<b.k?-1:1).map(r=>'<div class="rw"><span>contém <b>'+esc(r.k)+'</b><small>'+esc((S.cat[r.c]||{name:'?'}).name)+'</small></span><button class="btn ghost sm" data-r="'+r.id+'" aria-label="Excluir regra">Excluir</button></div>').join('')||'<div class="empty">Nenhuma regra ainda.</div>';
-  sheet('Regras automáticas','<p class="hint" style="margin-top:0">Quando a descrição de um lançamento importado contém a palavra-chave, a categoria é preenchida sozinha.</p><label>Palavra-chave<input id="r-k" placeholder="Ex.: uber"></label><label>Categoria<select id="r-c">'+catOptions('',false)+'</select></label><div class="btns" style="margin:0 0 14px"><button class="btn" id="r-add">Adicionar regra</button></div><div class="panel" id="r-list" style="border-radius:12px;border:1px solid var(--ln)">'+draw()+'</div>',b=>{
+  sheet('Regras automáticas','<p class="hint" style="margin-top:0">Quando a descrição de um lançamento importado contém a palavra-chave, a categoria é preenchida sozinha.</p><label>Palavra-chave<input id="r-k" placeholder="Ex.: uber"></label><label>Categoria<select id="r-c">'+catOptions('',false)+'</select></label><div class="btns" style="margin:0 0 14px"><button class="btn" id="r-add">Adicionar regra</button><button class="btn ghost" id="r-apply">Aplicar às sem categoria</button></div><div class="panel" id="r-list" style="border-radius:12px;border:1px solid var(--ln)">'+draw()+'</div>',b=>{
+    $('#r-apply',b).onclick=async()=>{let n=0;const dirty=new Set();allTx().forEach(t=>{if(!t.c){const c=autoCat(t.s);if(c){t.c=c;dirty.add(t.r);n++;}}});
+      for(const r of dirty)await saveMonth(r);render();toast(n?n+' lançamentos categorizados.':'Nenhum lançamento sem categoria se encaixou nas regras.');if(n)afterChange('cat','Regras aplicadas ('+n+' lançamentos)');};
     $('#r-add',b).onclick=async()=>{const k=$('#r-k',b).value;if(!norm2(k)){toast('Digite a palavra-chave.');return;}const n=await addRule(k,$('#r-c',b).value);$('#r-k',b).value='';$('#r-list',b).innerHTML=draw();render();toast(n?n+' lançamentos categorizados.':'Regra salva.');if(n)afterChange('cat','Regra "'+norm2(k)+'" ('+n+' lançamentos)');};
     $('#r-list',b).onclick=async e=>{const x=e.target.closest('[data-r]');if(!x)return;S.cfg.rules=S.cfg.rules.filter(r=>r.id!==x.dataset.r);await saveCfg();$('#r-list',b).innerHTML=draw();};});}
 
@@ -731,18 +747,18 @@ async function pdfLines(file,pw){
   const lib=await loadPdfjs();
   const buf=new Uint8Array(await file.arrayBuffer());
   const pdf=await lib.getDocument({data:buf,password:pw||undefined,isEvalSupported:false}).promise;
-  const out=[];
+  const out=[],struct=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p);const tc=await page.getTextContent();
     const its=tc.items.filter(i=>typeof i.str==='string'&&i.str.trim()!=='').map(i=>({s:i.str,x:i.transform[4],y:i.transform[5],w:i.width||0}));
     const rows=[];its.forEach(it=>{const r=rows.find(r=>Math.abs(r.y-it.y)<=3);if(r)r.it.push(it);else rows.push({y:it.y,it:[it]});});
     rows.sort((a,b)=>b.y-a.y);
-    rows.forEach(r=>{r.it.sort((a,b)=>a.x-b.x);let s='',end=null;
+    rows.forEach(r=>{r.it.sort((a,b)=>a.x-b.x);struct.push({p,y:r.y,items:r.it});let s='',end=null;
       r.it.forEach(it=>{if(end!==null&&it.x-end>1.5)s+=' ';s+=it.s;end=it.x+it.w;});
       out.push(s.replace(/\s+/g,' ').trim());});
     out.push('');}
   try{await pdf.destroy();}catch(e){}
-  return out.filter((l,i,a)=>l!==''||(i>0&&a[i-1]!==''));}
+  const res=out.filter((l,i,a)=>l!==''||(i>0&&a[i-1]!==''));res.struct=struct;return res;}
 function parsePdfLines(lines){
   let ctx=null;const full=[];
   lines.forEach(l=>{const n=norm(l);const m=n.match(/venc\w*\D{0,25}?(\d{2})[\/.](\d{2})[\/.](\d{4})/);if(m&&!ctx)ctx={y:+m[3],m:+m[2]};
@@ -768,15 +784,82 @@ function parsePdfLines(lines){
     if(!desc||desc.length<2||SKIP.test(norm2(desc)))return;
     out.push({d,s:desc,v,fit:''});});
   return out;}
+function docCtx(lines){let ctx=null;const full=[];
+  lines.forEach(l=>{const n=norm(l);const m=n.match(/venc\w*\D{0,25}?(\d{2})[\/.](\d{2})[\/.](\d{4})/);if(m&&!ctx)ctx={y:+m[3],m:+m[2]};
+    const re=/(\d{2})[\/.](\d{2})[\/.](\d{4})/g;let x;while((x=re.exec(l)))full.push({y:+x[3],m:+x[2],d:+x[1]});});
+  if(!ctx&&full.length){full.sort((a,b)=>(a.y*400+a.m*32+a.d)-(b.y*400+b.m*32+b.d));const f=full[full.length-1];ctx={y:f.y,m:f.m};}
+  if(!ctx){const t=new Date();ctx={y:t.getFullYear(),m:t.getMonth()+1};}return ctx;}
+function toDate(txt,ctx){txt=String(txt||'').trim();if(!txt)return null;const full=parseDate(txt);if(full)return full;
+  let m=txt.match(/^(\d{2})[\/.](\d{2})(?!\d)/);if(m){const mm=+m[2];let y=ctx.y;if(mm>ctx.m)y--;return validDate(y,mm,+m[1]);}
+  m=txt.match(/^(\d{1,2})\s+(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?(?:\s+(\d{4}))?/i);
+  if(m){const mm=MON[norm(m[2]).slice(0,3)];let y=m[3]?+m[3]:ctx.y;if(!m[3]&&mm>ctx.m)y--;return validDate(y,mm,+m[1]);}
+  return null;}
+/* Leitura por colunas: acha o cabeçalho da tabela (Data, Histórico, Docto., Crédito, Débito, Saldo ou Valor) e usa a posição de cada texto
+   para separar descrição, crédito, débito e saldo. Junta descrições de 2 linhas, repete a data nas linhas sem data e confere com a coluna Saldo. */
+function parsePdfTable(struct,lines){
+  if(!struct||!struct.length)return null;
+  const ctx=docCtx(lines);
+  const AMT=/^[-−+]?\s?(?:R\$\s?)?(?:\d{1,3}(?:\.\d{3})*|\d+),\d{2}-?$/;
+  const role=t=>{t=norm2(t);
+    if(/^data( |$)/.test(t))return 'date';
+    if(/^(historico|descricao|lancamentos?|estabelecimento|detalhes?)( |$)/.test(t))return 'desc';
+    if(/^(docto|documento|doc)( |$)/.test(t))return 'doc';
+    if(/^(creditos?|entradas?)( |$)/.test(t))return 'cr';
+    if(/^(debitos?|saidas?)( |$)/.test(t))return 'db';
+    if(/^(valor|amount|quantia)( |$)/.test(t))return 'val';
+    if(/^saldo( |$)/.test(t))return 'bal';return null;};
+  const headerOf=items=>{const c={};items.forEach(it=>{const r=role(it.s);if(r&&!c[r])c[r]={l:it.x,r:it.x+it.w};});return (c.date&&c.desc&&((c.cr&&c.db)||c.val))?c:null;};
+  const cleanDesc=a=>{const t=a[0]||'';let det=a.slice(1).join(' ');
+    det=det.replace(/\b(REM|DES)\s*:\s*/gi,'').replace(/\s+\d{2}\/\d{2}(?:\/\d{2,4})?\s*$/,'');
+    return (t+(det?' - '+det:'')).replace(/\bR\$\s*$/,'').replace(/\s+/g,' ').trim();};
+  /* passo 1: separa as linhas de cada página em "âncoras" (têm valor ou saldo) e "soltas" (só texto de descrição) */
+  let cols=null,cur=null;const pages=[];
+  struct.forEach(row=>{
+    const h=headerOf(row.items);if(h){cols=h;cur={anchors:[],loose:[],p:row.p};pages.push(cur);return;}
+    if(!cols)return;
+    if(!cur||cur.p!==row.p){cur={anchors:[],loose:[],p:row.p};pages.push(cur);}
+    const cell={date:[],desc:[],doc:[],cr:[],db:[],val:[],bal:[]};
+    const numCols=['cr','db','val','bal'].filter(r=>cols[r]),txtCols=['date','desc','doc'].filter(r=>cols[r]);
+    row.items.forEach(it=>{const t=it.s.trim();let r=null;
+      if(AMT.test(t)){let bd=1e9;const right=it.x+it.w;numCols.forEach(k=>{const d=Math.abs(right-cols[k].r);if(d<bd){bd=d;r=k;}});if(bd>45)r=null;}
+      if(!r){let bd=1e9;txtCols.forEach(k=>{const d=Math.abs(it.x-cols[k].l);if(d<bd){bd=d;r=k;}});}
+      cell[r].push(t);});
+    const rec={y:row.y,cell,dateTxt:cell.date.join(' ')};
+    if(cell.cr.length||cell.db.length||cell.val.length||cell.bal.length)cur.anchors.push(rec);
+    else if(cell.desc.length||rec.dateTxt)cur.loose.push(rec);});
+  /* passo 2: cada linha solta vai para o lançamento mais próximo na vertical (título acima do valor, detalhe abaixo) */
+  pages.forEach(pg=>{pg.anchors.forEach(a=>{a.above=[];a.below=[];});
+    pg.loose.forEach(l=>{let best=null,bd=1e9;pg.anchors.forEach(a=>{const d=Math.abs(a.y-l.y);if(d<bd){bd=d;best=a;}});
+      if(!best||bd>25)return;(l.y>best.y?best.above:best.below).push(l);});});
+  /* passo 3: lê os lançamentos em ordem, repete a data nas linhas sem data e confere com a coluna Saldo */
+  let last=null,prevBal=null,ok=0,bad=0;const out=[];
+  pages.forEach(pg=>pg.anchors.forEach(a=>{
+    const cell=a.cell;let dateTxt=a.dateTxt;
+    a.above.concat(a.below).forEach(l=>{if(!dateTxt&&l.dateTxt)dateTxt=l.dateTxt;});
+    const dt=toDate(dateTxt,ctx);if(dt)last=dt;
+    const hasNum=cell.cr.length||cell.db.length||cell.val.length;
+    const sb=cell.bal.length?parseAmt(cell.bal[0]):null;
+    if(!hasNum){if(sb!==null)prevBal=sb;return;}
+    const descLines=a.above.map(l=>l.cell.desc.join(' ')).concat([cell.desc.join(' ')],a.below.map(l=>l.cell.desc.join(' '))).map(x=>x.trim()).filter(Boolean);
+    let v;if(cell.val.length)v=parseAmt(cell.val[0]);
+    else{const c=cell.cr.length?parseAmt(cell.cr[0]):0,d=cell.db.length?parseAmt(cell.db[0]):0;v=(c||0)-Math.abs(d||0);}
+    const isTotal=/^(total|subtotal)( |$)/.test(norm2(dateTxt))||/^(total|subtotal|saldo)( |$)/.test(norm2(descLines.join(' ')));
+    if(isTotal||v===null||!v){if(sb!==null&&!isTotal)prevBal=sb;return;}
+    if(!last)return;
+    if(sb!==null){if(prevBal!==null){if(Math.abs(prevBal+v-sb)<0.006)ok++;else bad++;}prevBal=sb;}
+    out.push({d:last,s:cleanDesc(descLines),v,fit:''});}));
+  if(!cols)return null;
+  out.check={ok,bad};return out;}
 async function importPdf(file,pw){const accId=S.impAcc;const acc=S.acc[accId];let lines;
   toast('Lendo o PDF…');
   try{lines=await pdfLines(file,pw);}
   catch(e){if(e&&e.name==='PasswordException'){askPdfPw(file,e.code===2);return;}
     toast(e&&e.name==='NoLib'?'O leitor de PDF não carregou (arquivos pdfjs-lib.js e pdfjs-worker.js). Abra o app com internet uma vez e tente de novo.':'Não consegui abrir esse PDF.');return;}
   if(lines.join('').length<20){toast('Esse PDF parece ser uma imagem (digitalizado), sem texto para ler. A leitura por OCR não está incluída. Baixe o CSV ou OFX no banco.');return;}
-  const items=parsePdfLines(lines);
+  let items=null,check=null;try{items=parsePdfTable(lines.struct,lines);}catch(e){items=null;}
+  if(items&&items.length)check=items.check;else items=parsePdfLines(lines);
   if(!items.length){showRaw(lines);return;}
-  const I={acc:accId,name:file.name,fmt:'pdf',sign:acc.type==='card'?'pos':'neg',items:[],ref:'',ofx:items};
+  const I={acc:accId,name:file.name,fmt:'pdf',sign:acc.type==='card'?'pos':'neg',items:[],ref:'',ofx:items,check};
   S.imp=I;buildItems();
   if(acc.type==='card'&&acc.by!=='purchase'&&I.items.length){const mx=I.items.map(i=>i.d).sort().pop();I.ref=calcRef(accId,mx);}
   render();}
@@ -917,7 +1000,7 @@ async function boot(){
   $('#app').innerHTML='<div class="empty">Carregando…</div>';
   try{await Store.init();const c=await Store.load('config');if(!c.ok){fatal();return;}
     if(c.data){S.cfg=c.data;}else{S.cfg=seed();await saveCfg();}
-    S.cfg.refs=S.cfg.refs||[];S.cfg.rules=S.cfg.rules||[];idx();
+    S.cfg.refs=S.cfg.refs||[];S.cfg.rules=S.cfg.rules||[];idx();if(upgradeRules())await saveCfg();
     {const pr=await Store.load('prefs');if(pr.ok&&pr.data)Object.assign(PREFS,pr.data);else if(typeof window.showDirectoryPicker==='function')PREFS.autoFile='off';}
     try{await Dir.init();}catch(e){}
     const refs=S.cfg.refs.slice();
