@@ -308,7 +308,8 @@ const Store={col:null,mode:'local',q:{},mem:false,memData:{},
       catch(e){toast(e&&e.name==='QuotaExceededError'?'Sem espaço no armazenamento do navegador. Baixe um backup agora.':'Não foi possível salvar. Tente de novo.');}});
     this.q[k]=p;return p;}
 };
-const PWA={offline:null,persisted:null,installEvt:null};
+const APP_VERSION='v5';
+const PWA={offline:null,persisted:null,installEvt:null,updated:false,hadController:false,reg:null};
 const PREFS={autoFile:'imp+cat',lastFile:0};
 const savePrefs=()=>Store.save('prefs',PREFS);
 /* Cópias automáticas dentro do app (IndexedDB, compactadas quando o navegador permite). Guarda as 20 mais recentes. */
@@ -355,9 +356,9 @@ const allTx=()=>Object.keys(S.m).reduce((a,r)=>a.concat(S.m[r]),[]);
 function findTx(id){for(const r in S.m){const t=S.m[r].find(x=>x.i===id);if(t)return t;}return null;}
 function classify(t){const c=S.cat[t.c];if(c){return c.kind;}return t.v>0?'income':'expense';}
 function calcRef(accId,date){const a=S.acc[accId];
-  if(!a||a.type!=='card'||a.by==='purchase'||!a.closing||!a.due)return date.slice(0,7);
-  const d=+date.slice(8,10),base=date.slice(0,7);const closeM=d>a.closing?addMonths(base,1):base;
-  return a.due>a.closing?closeM:addMonths(closeM,1);}
+  if(!a||a.type!=='card'||a.by==='purchase'||!a.closing)return date.slice(0,7);
+  const d=+date.slice(8,10),base=date.slice(0,7);
+  return d>=a.closing?addMonths(base,1):base;}  /* a partir do dia da virada, o gasto conta no mês seguinte */
 function autoCat(desc){const n=norm2(desc);const rs=S.cfg.rules.slice().sort((a,b)=>b.k.length-a.k.length);const r=rs.find(r=>r.k&&n.includes(r.k));return r&&S.cat[r.c]?r.c:'';}
 const KW_STOP=new Set(['de','da','do','das','dos','em','me','sa','ltda','eireli','epp']);
 const KW_GENERIC=new Set(['pix','enviado','recebido','pagto','pagamento','eletron','cobranca','des','rem','compra','cartao','visa','master','mastercard','transf','transferencia','debito','credito','boleto','ted','doc','tarifa','pag']);
@@ -401,6 +402,8 @@ function parseCSV(text){text=text.replace(/^\uFEFF/,'');
     else cur+=c;}
   if(cur!==''||row.length){row.push(cur);if(row.some(x=>x.trim()!==''))rows.push(row);}
   return rows;}
+function ofxBal(text){const m=text.match(/<LEDGERBAL>[\s\S]*?<BALAMT>\s*([-+]?[\d.,]+)[\s\S]*?<DTASOF>\s*(\d{8})/i);if(!m)return [];
+  const d=validDate(m[2].slice(0,4),m[2].slice(4,6),m[2].slice(6,8));const v=parseFloat(m[1].replace(',','.'));return (d&&!isNaN(v))?[{d,v}]:[];}
 function parseOFX(text){const out=[];
   const blocks=text.match(/<STMTTRN>[\s\S]*?(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>|$)/gi)||[];
   const tag=(b,t)=>{const m=b.match(new RegExp('<'+t+'>([^<\\r\\n]*)','i'));return m?m[1].trim():'';};
@@ -419,7 +422,8 @@ function guessMap(rows,start){const hdr=start>0?rows[start-1]:[];const first=row
   if(v<0)v=first.findIndex((c,i)=>i!==d&&parseAmt(c)!==null&&/[,.]\d{2}$/.test(String(c).trim()));
   let s=hi(/descri|historico|title|titulo|estabelec|lancamento|memo|nome|detalhe/);
   if(s<0||s===d||s===v){let best=-1,len=-1;first.forEach((c,i)=>{if(i===d||i===v||i===x)return;if(parseAmt(c)!==null)return;if(c.length>len){len=c.length;best=i;}});s=best;}
-  return {d,s,v,x};}
+  const b=hi(/^saldo/);
+  return {d,s,v,x,b:(b===v||b===x)?-1:b};}
 function buildItems(){const I=S.imp;let items=[];
   if(I.fmt!=='csv'){items=I.ofx.map(o=>({d:o.d,s:o.s,v:o.v,fit:o.fit}));}
   else{const m=I.map;if(m.d>=0&&m.v>=0){I.data.forEach(r=>{const d=parseDate(r[m.d]);if(!d)return;let v=parseAmt(r[m.v]);if(v===null)v=0;
@@ -437,29 +441,35 @@ function buildItems(){const I=S.imp;let items=[];
   items.forEach(it=>{if(it.dup)return;const nn=norm2(it.s);
     const e=(pool[it.d+'|'+Math.round(it.v*100)]||[]).find(e=>!e.used&&(e.n.startsWith(nn)||nn.startsWith(e.n)));
     if(e){e.used=true;it.dup=true;it.keep=false;}});
+  I.balances=[];
+  if(I.fmt==='csv'){const m=I.map;if(m.b>=0&&m.d>=0){const mp={};I.data.forEach(r=>{const d=parseDate(r[m.d]);const b=parseAmt(r[m.b]);if(d&&b!==null)mp[d]=b;});I.balances=Object.keys(mp).sort().map(d=>({d,v:mp[d]}));}}
+  else{const mp={};(I.balList||[]).forEach(b=>{mp[b.d]=b.v;});I.balances=Object.keys(mp).sort().map(d=>({d,v:mp[d]}));}
   I.items=items;}
 async function startImport(file){const accId=$('#imp-acc').value;S.impAcc=accId;const acc=S.acc[accId];
   if(/\.pdf$/i.test(file.name)||file.type==='application/pdf'){await importPdf(file,'');return;}
   try{const text=await readText(file);const isOfx=/\.(ofx|qfx)$/i.test(file.name)||/<OFX>|<STMTTRN>/i.test(text.slice(0,4000));
     const I={acc:accId,name:file.name,fmt:isOfx?'ofx':'csv',sign:isOfx?'neg':(acc.type==='card'?'pos':'neg'),items:[],ref:''};
-    if(isOfx){I.ofx=parseOFX(text);if(!I.ofx.length){toast('Não encontrei lançamentos nesse arquivo OFX.');return;}}
+    if(isOfx){I.ofx=parseOFX(text);I.balList=ofxBal(text);if(!I.ofx.length){toast('Não encontrei lançamentos nesse arquivo OFX.');return;}}
     else{const rows=parseCSV(text);let start=rows.findIndex(r=>r.some(c=>parseDate(c)));
       if(start<0){toast('Não encontrei datas nesse arquivo. Confira se é um extrato em CSV.');return;}
       I.hdr=start>0?rows[start-1]:null;I.data=rows.slice(start);I.map=guessMap(rows,start);}
     S.imp=I;buildItems();
-    if(acc.type==='card'&&acc.by!=='purchase'&&I.items.length){const mx=I.items.map(i=>i.d).sort().pop();I.ref=calcRef(accId,mx);}
+    if(acc.type==='card'&&acc.by!=='purchase'&&I.items.length){const ds=I.items.map(i=>i.d).sort();I.ref=calcRef(accId,ds[Math.floor(ds.length/2)]);}
     render();
   }catch(e){toast('Não consegui ler esse arquivo.');}}
+async function saveBalances(I){const acc=S.acc[I.acc];if(!acc||acc.type==='card'||!I.balances||!I.balances.length)return 0;
+  S.cfg.bal=S.cfg.bal||{};const m=S.cfg.bal[I.acc]=S.cfg.bal[I.acc]||{};I.balances.forEach(b=>{m[b.d]=b.v;});await saveCfg();return I.balances.length;}
 async function doImport(){const I=S.imp;const acc=S.acc[I.acc];const list=I.items.filter(x=>x.keep);
-  if(!list.length){toast('Nenhum lançamento selecionado.');return;}
+  if(!list.length){const nb0=await saveBalances(I);if(nb0){S.imp=null;S.tab='contas';render();toast('Nenhum lançamento novo. '+nb0+' dias de saldo do extrato guardados.');}else toast('Nenhum lançamento selecionado.');return;}
   await snapshot('Antes de importar '+I.name,'pre');
   const useRef=acc.type==='card'&&acc.by!=='purchase'&&I.ref;const touched=new Set();let semCat=0;
   list.forEach(it=>{const r=useRef?I.ref:it.d.slice(0,7);if(!it.c)semCat++;
     (S.m[r]=S.m[r]||[]).push({i:uid(),d:it.d,s:it.s,v:it.v,a:I.acc,c:it.c||'',r,n:'',h:it.h});touched.add(r);});
   const refs=[...touched].sort();for(const r of refs)await saveMonth(r);
+  const nb=await saveBalances(I);
   const bk=await afterChange('imp','Importação de '+I.name+' ('+list.length+' lançamentos)');
   const dups=I.items.length-list.length;S.imp=null;S.ref=refs[refs.length-1];S.f={q:'',acc:'',cat:semCat?'_none':'',all:false};S.tab='lanc';render();
-  toast(list.length+' importados'+(dups?' · '+dups+' ignorados':'')+(semCat?' · '+semCat+' sem categoria':'')+bkMsg(bk));}
+  toast(list.length+' importados'+(dups?' · '+dups+' ignorados':'')+(semCat?' · '+semCat+' sem categoria':'')+(nb?' · saldo do extrato guardado':'')+bkMsg(bk));}
 
 /* ---------- componentes de UI ---------- */
 function catOptions(sel,none){let h=none===false?'':'<option value="">Sem categoria</option>';
@@ -482,14 +492,14 @@ function header(){const t=S.tab;const mo=t==='resumo'||(t==='lanc'&&!S.f.all);
 function render(){renderTabs();const t=S.tab;let v='';
   if(t==='resumo')v=viewResumo();else if(t==='lanc')v=viewLanc();else if(t==='imp')v=viewImport();else if(t==='contas')v=viewContas();else v=viewMais();
   const fab=(t==='resumo'||t==='lanc')&&S.cfg.accounts.length?'<button class="fab" data-act="addtx" aria-label="Novo lançamento">+</button>':'';
-  $('#app').innerHTML=header()+v+fab;if(t==='lanc')renderTxList();window.scrollTo(0,0);}
+  $('#app').innerHTML=header()+(PWA.updated?'<button class="alert" data-act="reload"><span>Nova versão do app instalada</span><b>Recarregar</b></button>':'')+v+fab;if(t==='lanc')renderTxList();window.scrollTo(0,0);}
 
 function viewResumo(){
   if(!S.cfg.accounts.length)return empty('Comece cadastrando suas contas bancárias e cartões de crédito. Depois é só importar os extratos e faturas.','Cadastrar conta ou cartão','goaccs');
   const c=calc(S.ref);const bal=c.inc-c.exp;const pct=c.inc>0?Math.min(100,c.exp/c.inc*100):(c.exp>0?100:0);
   let h='<section class="ledger"><div class="lg-row"><div><span class="lbl">Entradas</span><b class="in">'+money(c.inc)+'</b></div><div><span class="lbl">Saídas</span><b class="out">'+money(c.exp)+'</b></div></div>'
     +'<div class="meter" role="img" aria-label="Saídas equivalem a '+Math.round(pct)+'% das entradas"><i style="width:'+pct+'%"></i></div>'
-    +'<div class="lg-bal"><span class="lbl">Saldo do mês</span><strong class="'+(bal<0?'out':'in')+'">'+money(bal)+'</strong></div></section>';
+    +'<div class="lg-bal"><span class="lbl">Resultado do mês (entradas − saídas)</span><strong class="'+(bal<0?'out':'in')+'">'+money(bal)+'</strong></div><p class="hint" style="margin:10px 0 0">Só os movimentos deste mês, sem saldo acumulado. O saldo das contas fica em <b>Contas</b>.</p></section>';
   if(Dir.state==='perm'||Dir.state==='guard'||Dir.state==='error')h+='<button class="alert" data-act="dirfix"><span>'+(Dir.state==='perm'?'Backup na pasta: autorização necessária':Dir.state==='guard'?'Backup da pasta não foi sobrescrito (app vazio)':'Falha ao gravar o backup na pasta')+'</span><b>'+(Dir.state==='guard'?'Ver':'Autorizar')+'</b></button>';
   else if(Dir.supported()&&!Dir.handle&&allTx().length>0)h+='<button class="alert" data-act="choosedir"><span>Escolha uma pasta para o backup automático</span><b>Escolher</b></button>';
   const unc=c.list.filter(t=>!t.c&&classify(t)!=='ignore').length;
@@ -503,7 +513,7 @@ function viewResumo(){
       +cids.map(cid=>'<li><span>'+esc(cid==='_none'?'Sem categoria':(S.cat[cid]||{name:'?'}).name)+'</span><span>'+money(g.cats[cid])+'</span></li>').join('')+'</ul></details>';});
   h+='</div></div>';
   const aids=Object.keys(c.byA).sort((a,b)=>c.byA[b]-c.byA[a]);
-  if(aids.length){h+='<div class="sec"><h2>Por conta e cartão</h2><div class="panel">'+aids.map(id=>'<div class="rw"><span>'+esc((S.acc[id]||{name:'Conta removida'}).name)+'</span><span class="amt out">'+money(c.byA[id])+'</span></div>').join('')+'</div></div>';}
+  if(aids.length){h+='<div class="sec"><h2>Saídas do mês por conta e cartão</h2><div class="panel">'+aids.map(id=>'<div class="rw"><span>'+esc((S.acc[id]||{name:'Conta removida'}).name)+'</span><span class="amt out">'+money(c.byA[id])+'</span></div>').join('')+'</div></div>';}
   const top=c.list.filter(t=>classify(t)==='expense'&&t.v<0).sort((a,b)=>a.v-b.v).slice(0,5);
   if(top.length)h+='<div class="sec"><h2>Maiores gastos</h2><div class="panel">'+top.map(t=>'<button class="rw" data-act="tx" data-id="'+t.i+'"><span><b style="font-weight:500">'+esc(t.s)+'</b><small>'+fmtD(t.d)+'</small></span><span class="amt out">'+money(-t.v)+'</span></button>').join('')+'</div></div>';
   h+='<div class="sec"><h2>Últimos 6 meses</h2>'+chart()+'</div>';
@@ -549,11 +559,13 @@ function viewImport(){const accs=S.cfg.accounts.filter(a=>!a.off);
     +'<p class="hint">Importar de novo o mesmo arquivo não duplica nada: lançamentos que já existem são marcados e ficam desmarcados. A leitura de PDF é aproximada, porque cada banco usa um layout: confira tudo na prévia antes de importar. CSV e OFX costumam ser mais precisos.</p></section>';
   const acc=S.acc[I.acc];let cfg='<div class="cfg"><p class="lead" style="margin-bottom:10px"><b>'+esc(I.name)+'</b> → '+esc(acc.name)+'</p>';
   if(I.fmt==='csv'){const cols=(sel,none)=>(none?'<option value="-1"'+(sel<0?' selected':'')+'>Nenhuma</option>':'')+I.data[0].map((c,i)=>'<option value="'+i+'"'+(i===sel?' selected':'')+'>'+esc((I.hdr&&I.hdr[i]?I.hdr[i]:'Coluna '+(i+1))+' — '+String(c).slice(0,22))+'</option>').join('');
-    cfg+='<div class="g2"><label>Data<select id="imp-d">'+cols(I.map.d)+'</select></label><label>Valor<select id="imp-v">'+cols(I.map.v)+'</select></label></div><label>Descrição<select id="imp-s">'+cols(I.map.s,true)+'</select></label><label>Coluna de débito (só se o valor de crédito e o de débito estão separados)<select id="imp-x">'+cols(I.map.x,true)+'</select></label>';}
+    cfg+='<div class="g2"><label>Data<select id="imp-d">'+cols(I.map.d)+'</select></label><label>Valor<select id="imp-v">'+cols(I.map.v)+'</select></label></div><label>Descrição<select id="imp-s">'+cols(I.map.s,true)+'</select></label><label>Coluna de débito (só se o valor de crédito e o de débito estão separados)<select id="imp-x">'+cols(I.map.x,true)+'</select></label><label>Coluna de saldo (opcional): o saldo do extrato é guardado à parte e não vira lançamento<select id="imp-b">'+cols(I.map.b,true)+'</select></label>';}
   cfg+='<label>Como o arquivo marca os gastos?<select id="imp-sign"><option value="neg"'+(I.sign==='neg'?' selected':'')+'>Gastos são negativos (comum em extratos)</option><option value="pos"'+(I.sign==='pos'?' selected':'')+'>Gastos são positivos (comum em faturas)</option></select></label>';
-  if(acc.type==='card'&&acc.by!=='purchase')cfg+='<label>Mês da fatura (vencimento)<input type="month" id="imp-ref" value="'+esc(I.ref)+'"></label>';
+  if(acc.type==='card'&&acc.by!=='purchase')cfg+='<label>Mês em que a fatura conta (pela virada do cartão)<input type="month" id="imp-ref" value="'+esc(I.ref)+'"></label>';
   if(I.fmt==='pdf')cfg+='<p class="hint" style="margin:0">Leitura de PDF é aproximada. Confira datas, descrições e valores abaixo. Toque no valor de um lançamento para inverter o sinal.</p>';
   if(I.fmt==='pdf'&&I.check&&(I.check.ok+I.check.bad)>0)cfg+='<p class="hint" style="margin:6px 0 0">'+(I.check.bad===0?'<b>Conferência com a coluna Saldo do extrato:</b> todos os '+I.check.ok+' lançamentos fecham.':'<b>Conferência com a coluna Saldo:</b> '+I.check.bad+' de '+(I.check.ok+I.check.bad)+' lançamentos não fecham com o saldo. Algum lançamento pode ter ficado de fora ou com valor errado. Confira.')+'</p>';
+  if(I.fmt==='pdf')cfg+='<p class="hint" style="margin:6px 0 0">Leitura: <b>'+(I.mode==='colunas'?'por colunas (a mais precisa)':'por texto (aproximada)')+'</b>.</p>';
+  if(acc.type!=='card'&&I.balances&&I.balances.length){const lb=I.balances[I.balances.length-1];cfg+='<p class="hint" style="margin:6px 0 0"><b>Saldo do extrato:</b> '+I.balances.length+' dias de saldo serão guardados à parte (último: '+fmtD(lb.d)+', '+money(lb.v)+'). Eles <b>não</b> viram lançamentos nem entram nos totais do mês; aparecem em Contas.</p>';}
   cfg+='</div>';
   const keep=I.items.filter(x=>x.keep);let inc=0,exp=0;keep.forEach(x=>{if(x.v>0)inc+=x.v;else exp-=x.v;});
   let h=cfg+'<div class="sum" style="padding-top:12px">'+keep.length+' de '+I.items.length+' selecionados · gastos '+money(exp)+' · entradas '+money(inc)+'</div>';
@@ -565,19 +577,19 @@ function viewImport(){const accs=S.cfg.accounts.filter(a=>!a.off);
 
 function viewContas(){
   const banks=S.cfg.accounts.filter(a=>a.type!=='card'),cards=S.cfg.accounts.filter(a=>a.type==='card');
-  let total=0;banks.filter(a=>!a.off).forEach(a=>total+=balance(a));
+  let total=0;banks.filter(a=>!a.off).forEach(a=>total+=saldoAtual(a).v);
   let h='<section class="pad" style="padding-bottom:0"><div class="btns" style="margin:0"><button class="btn" data-act="newacc">Adicionar conta ou cartão</button></div></section>';
   if(!S.cfg.accounts.length)return h+empty('Nada cadastrado ainda. Adicione seus bancos e cartões para separar os lançamentos.');
   const fat=S.ref;
-  if(banks.length){h+='<div class="sec"><h2>Contas</h2><div class="panel">'+banks.map(a=>{const b=balance(a);return '<button class="rw" data-act="editacc" data-id="'+a.id+'"><span>'+esc(a.name)+(a.off?'<span class="badge">arquivada</span>':'')+'<small>'+(a.type==='cash'?'Dinheiro':'Conta bancária')+'</small></span><span class="amt '+(b<0?'out':'')+'">'+money(b)+'</span></button>';}).join('')+'<div class="rw"><span class="neutral">Total em contas</span><span class="amt">'+money(total)+'</span></div></div></div>';}
-  if(cards.length){h+='<div class="sec"><h2>Cartões de crédito</h2><div class="panel">'+cards.map(a=>{const tot=(S.m[fat]||[]).filter(t=>t.a===a.id&&classify(t)!=='income').reduce((s,t)=>s-t.v,0);
-    return '<button class="rw" data-act="editacc" data-id="'+a.id+'"><span>'+esc(a.name)+(a.off?'<span class="badge">arquivado</span>':'')+'<small>'+(a.closing&&a.due?'Fecha dia '+a.closing+' · vence dia '+a.due:'Sem datas definidas')+(a.limit?' · limite '+money(a.limit):'')+'</small></span><span><span class="amt out">'+money(tot)+'</span><small style="text-align:right">'+monthShort(fat)+'</small></span></button>';}).join('')+'</div></div>';}
+  if(banks.length){h+='<div class="sec"><h2>Contas: saldo acumulado</h2><div class="panel">'+banks.map(a=>{const sa=saldoAtual(a);const b=sa.v;return '<button class="rw" data-act="saldo" data-id="'+a.id+'"><span>'+esc(a.name)+(a.off?'<span class="badge">arquivada</span>':'')+'<small>'+(sa.src==='extrato'?'Saldo do extrato de '+fdFull(sa.d):'Saldo calculado pelos lançamentos')+' · toque para ver a evolução</small></span><span class="amt '+(b<0?'out':'')+'">'+money(b)+'</span></button>';}).join('')+'<div class="rw"><span class="neutral">Saldo total das contas</span><span class="amt">'+money(total)+'</span></div></div></div>';}
+  if(cards.length){h+='<div class="sec"><h2>Cartões de crédito: fatura do mês</h2><div class="panel">'+cards.map(a=>{const tot=(S.m[fat]||[]).filter(t=>t.a===a.id&&classify(t)!=='income').reduce((s,t)=>s-t.v,0);
+    return '<button class="rw" data-act="editacc" data-id="'+a.id+'"><span>'+esc(a.name)+(a.off?'<span class="badge">arquivado</span>':'')+'<small>'+(a.closing&&a.due?'Vira dia '+a.closing+' · vence dia '+a.due:'Sem datas definidas')+(a.limit?' · limite '+money(a.limit):'')+'</small></span><span><span class="amt out">'+money(tot)+'</span><small style="text-align:right">fatura de '+monthShort(fat)+'</small></span></button>';}).join('')+'</div></div>';}
   return h;}
 
 function viewMais(){
-  return backupBlock()+'<div class="menu" style="margin-top:14px">'+(PWA.installEvt?'<button data-act="install"><span>Instalar app na tela inicial</span><span>›</span></button>':'')+'<button data-act="report"><span>Relatórios em PDF</span><span>›</span></button><button data-act="cats"><span>Categorias e grupos</span><span>›</span></button><button data-act="rules"><span>Regras de categorização automática</span><span>›</span></button><button data-act="backup"><span>Cópias no app, CSV e backup em Downloads</span><span>›</span></button></div>'
+  return backupBlock()+'<div class="menu" style="margin-top:14px">'+(PWA.installEvt?'<button data-act="install"><span>Instalar app na tela inicial</span><span>›</span></button>':'')+'<button data-act="report"><span>Relatórios em PDF</span><span>›</span></button><button data-act="saldo"><span>Saldo acumulado das contas</span><span>›</span></button><button data-act="cats"><span>Categorias e grupos</span><span>›</span></button><button data-act="rules"><span>Regras de categorização automática</span><span>›</span></button><button data-act="backup"><span>Cópias no app, CSV e backup em Downloads</span><span>›</span></button>'+(('serviceWorker' in navigator&&!window.claude)?'<button data-act="forceupd"><span>Atualizar o app agora (precisa de internet)</span><span>›</span></button>':'')+'</div>'
     +pwaStatus();}
-function pwaStatus(){const l=[];
+function pwaStatus(){const l=['Versão do app: '+APP_VERSION+'.'];
   l.push(Store.mode==='cloud'?'Seus dados ficam salvos na sua conta, privados, e aparecem em qualquer aparelho em que você abrir este app.':(Store.mem?'<b>Atenção:</b> o navegador bloqueou o armazenamento. Os dados serão perdidos ao fechar o app. Faça backup.':'Seus dados ficam salvos só neste aparelho, dentro do app. Exporte um backup de vez em quando (botão Exportar backup).'));
   if(Store.mode!=='cloud'){
     if('serviceWorker' in navigator)l.push(PWA.offline===true?'Uso offline: pronto.':PWA.offline===false?'Uso offline: ainda não está pronto. Abra o app com internet e aguarde alguns segundos.':'Uso offline: verificando...');
@@ -589,7 +601,11 @@ async function setupPwa(){
   if(Store.mem)toast('O navegador bloqueou o armazenamento. Os dados não serão guardados.');
   try{if(navigator.storage&&navigator.storage.persisted){PWA.persisted=(await navigator.storage.persisted())||(navigator.storage.persist?await navigator.storage.persist():false);}}catch(e){}
   if(!('serviceWorker' in navigator)||!/^https?:$/.test(location.protocol)||window.claude){refreshMais();return;}
-  try{await navigator.serviceWorker.register('service-worker.js');await navigator.serviceWorker.ready;
+  try{PWA.hadController=!!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange',()=>{if(PWA.hadController){PWA.updated=true;if($('#ov'))toast('Nova versão instalada. Toque em Recarregar.');else render();}});
+    PWA.reg=await navigator.serviceWorker.register('service-worker.js');await navigator.serviceWorker.ready;
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden&&PWA.reg)PWA.reg.update().catch(()=>{});});
+    PWA.reg.update().catch(()=>{});
     const need=['index.html','manifest.webmanifest','pdfjs-lib.js','pdfjs-worker.js','pdf-lib.min.js'];
     const hits=await Promise.all(need.map(n=>caches.match(n)));PWA.offline=hits.every(Boolean);
   }catch(e){PWA.offline=false;}
@@ -638,13 +654,13 @@ function openAcc(id){const old=id?S.acc[id]:null;const t0=old?old.type:'bank';
   const html='<label>Nome<input id="a-n" placeholder="Ex.: Itaú, Nubank, Cartão Inter" value="'+esc(old?old.name:'')+'"></label>'
     +'<label>Tipo<select id="a-t"><option value="bank">Conta bancária</option><option value="card">Cartão de crédito</option><option value="cash">Dinheiro / carteira</option></select></label>'
     +'<div id="a-bank"><label>Saldo inicial (antes dos lançamentos)<input id="a-i" inputmode="decimal" placeholder="0,00" value="'+(old&&old.init?String(old.init).replace('.',','):'')+'"></label></div>'
-    +'<div id="a-card" hidden><div class="cfg" style="padding:0;border:0;background:none"><div class="g2"><label>Dia do fechamento<input id="a-c" inputmode="numeric" placeholder="Ex.: 10" value="'+(old&&old.closing||'')+'"></label><label>Dia do vencimento<input id="a-d" inputmode="numeric" placeholder="Ex.: 17" value="'+(old&&old.due||'')+'"></label></div></div>'
+    +'<div id="a-card" hidden><div class="cfg" style="padding:0;border:0;background:none"><div class="g2"><label>Dia da virada do cartão (fechamento)<input id="a-c" inputmode="numeric" placeholder="Ex.: 10" value="'+(old&&old.closing||'')+'"></label><label>Dia do vencimento<input id="a-d" inputmode="numeric" placeholder="Ex.: 17" value="'+(old&&old.due||'')+'"></label></div></div>'
     +'<label>Limite (opcional)<input id="a-l" inputmode="decimal" value="'+(old&&old.limit?String(old.limit).replace('.',','):'')+'"></label>'
-    +'<label>Contar os gastos no mês…<select id="a-b"><option value="due">do vencimento da fatura</option><option value="purchase">da data da compra</option></select></label></div>'
+    +'<label>Em qual mês contar os gastos do cartão?<select id="a-b"><option value="close">Pela virada: compras a partir do dia da virada contam no mês seguinte</option><option value="purchase">Pela data da compra</option></select></label></div>'
     +(old?'<label class="chk"><input type="checkbox" id="a-off" '+(old.off?'checked':'')+'> Arquivar (esconde das listas, mantém o histórico)</label>':'')
     +'<div class="btns"><button class="btn" id="a-save">Salvar</button>'+(old?'<button class="btn ghost" id="a-view">Ver lançamentos</button>':'')+(old&&!hasTx?'<button class="btn danger" id="a-del">Excluir</button>':'')+'</div>';
   sheet(old?'Editar conta':'Nova conta ou cartão',html,b=>{
-    $('#a-t',b).value=t0;if(old&&old.by)$('#a-b',b).value=old.by;
+    $('#a-t',b).value=t0;$('#a-b',b).value=(old&&old.by==='purchase')?'purchase':'close';
     const sw=()=>{const t=$('#a-t',b).value;$('#a-bank',b).hidden=t==='card';$('#a-card',b).hidden=t!=='card';};$('#a-t',b).onchange=sw;sw();
     $('#a-save',b).onclick=async()=>{const name=$('#a-n',b).value.trim();if(!name){toast('Dê um nome para a conta.');return;}
       const type=$('#a-t',b).value;const a=old||{id:uid()};a.name=name;a.type=type;
@@ -737,6 +753,42 @@ function openBackup(){
       ask('Restaurar cópia','Voltar os dados ao estado de '+fdt(rec.ts)+' ('+rec.label+')? O estado atual é guardado antes numa cópia, então dá para desfazer.','Restaurar',()=>applyRestore(j));};
     $('#b-file',b).onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)importBackupFile(f);};});}
 
+/* ---------- saldo acumulado das contas (fica separado dos totais do mês) ---------- */
+const fdFull=iso=>iso.split('-').reverse().join('/');
+function saldoSeries(a){const rep=(S.cfg.bal&&S.cfg.bal[a.id])||{};const days=Object.keys(rep).sort();
+  if(days.length)return days.map(d=>({d,v:rep[d]}));
+  const by={};allTx().forEach(t=>{if(t.a===a.id)by[t.d]=(by[t.d]||0)+t.v;});let run=+a.init||0;
+  return Object.keys(by).sort().map(d=>{run+=by[d];return {d,v:run};});}
+function saldoAtual(a){const rep=(S.cfg.bal&&S.cfg.bal[a.id])||{};const days=Object.keys(rep).sort();
+  if(days.length){const last=days[days.length-1];let v=rep[last];allTx().forEach(t=>{if(t.a===a.id&&t.d>last)v+=t.v;});return {v,d:last,src:'extrato'};}
+  return {v:balance(a),d:null,src:'calculado'};}
+function saldoAt(a,date){let r=null;saldoSeries(a).forEach(x=>{if(x.d<=date)r=x;});return r;}
+function openSaldo(id){
+  const banks=S.cfg.accounts.filter(a=>a.type!=='card'&&!a.off);
+  if(!banks.length){toast('Cadastre uma conta bancária em Contas.');return;}
+  const a=(id&&S.acc[id]&&S.acc[id].type!=='card')?S.acc[id]:banks[0];
+  const cur=saldoAtual(a),ser=saldoSeries(a);
+  const ends={};ser.forEach(x=>{ends[x.d.slice(0,7)]=x;});const ms=Object.keys(ends).sort();
+  const rowsM=ms.map((m,i)=>({m,e:ends[m],dlt:i>0?ends[m].v-ends[ms[i-1]].v:null})).reverse().slice(0,12);
+  let chart='';
+  if(ser.length>=2){const W=320,H=120,P=6;const t0=new Date(ser[0].d).getTime(),t1=new Date(ser[ser.length-1].d).getTime();
+    const vs=ser.map(x=>x.v);const mn=Math.min(...vs),mx=Math.max(...vs),rg=(mx-mn)||1;
+    const pts=ser.map(x=>{const px=P+((new Date(x.d).getTime()-t0)/((t1-t0)||1))*(W-2*P);const py=H-P-((x.v-mn)/rg)*(H-2*P);return px.toFixed(1)+','+py.toFixed(1);}).join(' ');
+    chart='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Evolução do saldo de '+esc(a.name)+'" style="width:100%;height:auto;display:block;margin-top:6px"><polyline points="'+pts+'" fill="none" stroke="var(--ac)" stroke-width="2" stroke-linejoin="round"/></svg><div class="legend" style="justify-content:space-between"><span>'+fdFull(ser[0].d)+'</span><span>mín '+money(mn)+' · máx '+money(mx)+'</span><span>'+fdFull(ser[ser.length-1].d)+'</span></div>';}
+  const box='border-radius:12px;border:1px solid var(--ln);margin-bottom:18px';
+  const html='<label>Conta<select id="sd-a">'+banks.map(b=>'<option value="'+b.id+'"'+(b.id===a.id?' selected':'')+'>'+esc(b.name)+'</option>').join('')+'</select></label>'
+    +'<div style="margin:2px 0 8px"><span class="lbl">Saldo acumulado da conta</span><div class="big" style="font-size:32px;font-weight:700;color:'+(cur.v<0?'var(--out)':'var(--ink)')+'">'+money(cur.v)+'</div>'
+    +'<p class="hint" style="margin:4px 0 0">'+(cur.src==='extrato'?'Último saldo do extrato ('+fdFull(cur.d)+'), somado aos lançamentos feitos depois dessa data.':'Calculado: saldo inicial + todos os lançamentos. Importe um extrato com a coluna Saldo (PDF ou CSV) para trazer o saldo real do banco.')+'</p></div>'+chart
+    +'<h3 style="font-size:16px;margin:18px 0 8px">Saldo no fim de cada mês</h3><div class="panel" style="'+box+'">'+(rowsM.length?rowsM.map(r=>'<div class="rw"><span>'+monthLabel(r.m)+'<small>último saldo em '+fdFull(r.e.d)+(r.dlt===null?'':' · variação '+(r.dlt>=0?'+':'−')+money(Math.abs(r.dlt)).replace(/^-/,''))+'</small></span><span class="amt">'+money(r.e.v)+'</span></div>').join(''):'<div class="rw neutral">Sem dados de saldo.</div>')+'</div>'
+    +'<h3 style="font-size:16px;margin:0 0 8px">Saldo por dia</h3><div class="panel" style="'+box+'">'+(ser.length?ser.slice(-45).reverse().map(x=>'<div class="rw"><span>'+fdFull(x.d)+'</span><span class="amt">'+money(x.v)+'</span></div>').join(''):'<div class="rw neutral">Sem dados de saldo.</div>')+'</div>'
+    +'<div class="btns"><button class="btn ghost" id="sd-edit">Editar conta</button></div>';
+  sheet('Saldo acumulado',html,b=>{$('#sd-a',b).onchange=e=>openSaldo(e.target.value);$('#sd-edit',b).onclick=()=>{closeSheet();openAcc(a.id);};});}
+async function forceUpdate(){
+  try{const r=await fetch('index.html',{cache:'no-store'});if(!r.ok)throw new Error('http');}catch(e){toast('Sem internet: não dá para atualizar agora.');return;}
+  toast('Atualizando...');
+  try{const rs=await navigator.serviceWorker.getRegistrations();await Promise.all(rs.map(r=>r.unregister()));const ks=await caches.keys();await Promise.all(ks.map(k=>caches.delete(k)));}catch(e){}
+  location.reload();}
+
 /* ---------- leitura de PDF ---------- */
 let PDFJS=null;
 async function loadPdfjs(){if(PDFJS)return PDFJS;
@@ -768,7 +820,7 @@ function parsePdfLines(lines){
   const DATE=/^(\d{2})[\/.](\d{2})(?:[\/.](\d{2,4}))?(?!\d)\s*/;
   const DATE2=/^(\d{1,2})\s+(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?(?:\s+(\d{4}))?\s*/i;
   const AM=/([-−+]?)(?:R\$\s?)?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})(-?)(?:\s?([CD])(?![A-Za-z]))?/g;
-  const SKIP=/^(saldo|total|subtotal|limite|encargos|pagamento minimo|valor da fatura|fatura anterior|resumo)/;
+  const SKIP=/^(cod lanc|saldo|total|subtotal|limite|encargos|pagamento minimo|valor da fatura|fatura anterior|resumo)/;
   const out=[];
   lines.forEach(l=>{let m=l.match(DATE),d=null,rest='';
     if(m){const dd=+m[1],mm=+m[2];let y=m[3]?+m[3]:null;if(y!==null&&y<100)y+=2000;if(y===null){y=ctx.y;if(mm>ctx.m)y--;}d=validDate(y,mm,dd);rest=l.slice(m[0].length);}
@@ -832,36 +884,36 @@ function parsePdfTable(struct,lines){
     pg.loose.forEach(l=>{let best=null,bd=1e9;pg.anchors.forEach(a=>{const d=Math.abs(a.y-l.y);if(d<bd){bd=d;best=a;}});
       if(!best||bd>25)return;(l.y>best.y?best.above:best.below).push(l);});});
   /* passo 3: lê os lançamentos em ordem, repete a data nas linhas sem data e confere com a coluna Saldo */
-  let last=null,prevBal=null,ok=0,bad=0;const out=[];
+  let last=null,prevBal=null,ok=0,bad=0;const out=[],bals=[];
   pages.forEach(pg=>pg.anchors.forEach(a=>{
     const cell=a.cell;let dateTxt=a.dateTxt;
     a.above.concat(a.below).forEach(l=>{if(!dateTxt&&l.dateTxt)dateTxt=l.dateTxt;});
     const dt=toDate(dateTxt,ctx);if(dt)last=dt;
     const hasNum=cell.cr.length||cell.db.length||cell.val.length;
     const sb=cell.bal.length?parseAmt(cell.bal[0]):null;
-    if(!hasNum){if(sb!==null)prevBal=sb;return;}
+    if(!hasNum){if(sb!==null){prevBal=sb;if(last)bals.push({d:last,v:sb});}return;}
     const descLines=a.above.map(l=>l.cell.desc.join(' ')).concat([cell.desc.join(' ')],a.below.map(l=>l.cell.desc.join(' '))).map(x=>x.trim()).filter(Boolean);
     let v;if(cell.val.length)v=parseAmt(cell.val[0]);
     else{const c=cell.cr.length?parseAmt(cell.cr[0]):0,d=cell.db.length?parseAmt(cell.db[0]):0;v=(c||0)-Math.abs(d||0);}
     const isTotal=/^(total|subtotal)( |$)/.test(norm2(dateTxt))||/^(total|subtotal|saldo)( |$)/.test(norm2(descLines.join(' ')));
-    if(isTotal||v===null||!v){if(sb!==null&&!isTotal)prevBal=sb;return;}
+    if(isTotal||v===null||!v){if(sb!==null&&!isTotal){prevBal=sb;if(last)bals.push({d:last,v:sb});}return;}
     if(!last)return;
-    if(sb!==null){if(prevBal!==null){if(Math.abs(prevBal+v-sb)<0.006)ok++;else bad++;}prevBal=sb;}
+    if(sb!==null){if(prevBal!==null){if(Math.abs(prevBal+v-sb)<0.006)ok++;else bad++;}prevBal=sb;bals.push({d:last,v:sb});}
     out.push({d:last,s:cleanDesc(descLines),v,fit:''});}));
   if(!cols)return null;
-  out.check={ok,bad};return out;}
+  out.check={ok,bad};out.balances=bals;return out;}
 async function importPdf(file,pw){const accId=S.impAcc;const acc=S.acc[accId];let lines;
   toast('Lendo o PDF…');
   try{lines=await pdfLines(file,pw);}
   catch(e){if(e&&e.name==='PasswordException'){askPdfPw(file,e.code===2);return;}
     toast(e&&e.name==='NoLib'?'O leitor de PDF não carregou (arquivos pdfjs-lib.js e pdfjs-worker.js). Abra o app com internet uma vez e tente de novo.':'Não consegui abrir esse PDF.');return;}
   if(lines.join('').length<20){toast('Esse PDF parece ser uma imagem (digitalizado), sem texto para ler. A leitura por OCR não está incluída. Baixe o CSV ou OFX no banco.');return;}
-  let items=null,check=null;try{items=parsePdfTable(lines.struct,lines);}catch(e){items=null;}
-  if(items&&items.length)check=items.check;else items=parsePdfLines(lines);
+  let items=null,check=null,balList=[];try{items=parsePdfTable(lines.struct,lines);}catch(e){items=null;}
+  if(items&&items.length){check=items.check;balList=items.balances||[];}else items=parsePdfLines(lines);
   if(!items.length){showRaw(lines);return;}
-  const I={acc:accId,name:file.name,fmt:'pdf',sign:acc.type==='card'?'pos':'neg',items:[],ref:'',ofx:items,check};
+  const I={acc:accId,name:file.name,fmt:'pdf',sign:acc.type==='card'?'pos':'neg',items:[],ref:'',ofx:items,check,balList,mode:check?'colunas':'texto'};
   S.imp=I;buildItems();
-  if(acc.type==='card'&&acc.by!=='purchase'&&I.items.length){const mx=I.items.map(i=>i.d).sort().pop();I.ref=calcRef(accId,mx);}
+  if(acc.type==='card'&&acc.by!=='purchase'&&I.items.length){const ds=I.items.map(i=>i.d).sort();I.ref=calcRef(accId,ds[Math.floor(ds.length/2)]);}
   render();}
 function askPdfPw(file,wrong){sheet('PDF protegido','<p class="lead">'+(wrong?'Senha incorreta. ':'')+'Este PDF tem senha. Muitos bancos usam os primeiros dígitos do CPF. A senha não é guardada.</p><label>Senha<input id="pw" type="password" autocomplete="off"></label><div class="btns"><button class="btn" id="pw-ok">Abrir</button></div>',b=>{
     $('#pw-ok',b).onclick=()=>{const pw=$('#pw',b).value;closeSheet();importPdf(file,pw);};});}
@@ -901,7 +953,7 @@ async function genReport(from,to,withList){
   T('Relatório financeiro',M,y+18,{b:1,s:20});y+=28;
   T(per+'  -  gerado em '+new Date().toLocaleDateString('pt-BR'),M,y+11,{s:11,c:MU});y+=26;
   const bal=R.inc-R.exp;const bw3=CW/3;
-  [['Entradas',R.inc,IN],['Saídas',R.exp,OUT],['Saldo do período',bal,bal<0?OUT:IN]].forEach((b,i)=>{const x=M+bw3*i;
+  [['Entradas',R.inc,IN],['Saídas',R.exp,OUT],['Resultado do período',bal,bal<0?OUT:IN]].forEach((b,i)=>{const x=M+bw3*i;
     T(b[0],x,y+9,{s:9,c:MU});T(fm(b[1]),x,y+27,{b:1,s:15,c:b[2]});});
   y+=40;hline(y);y+=22;
   const h2=t=>{ensure(60);T(t,M,y+11,{b:1,s:13});y+=22;};
@@ -930,6 +982,9 @@ async function genReport(from,to,withList){
     table([{h:'Grupo / categoria',w:320},{h:'Valor',w:120,a:'r'},{h:'% das saídas',w:75,a:'r'}],rows,10);}
   const aids=Object.keys(R.byA).sort((a,b)=>R.byA[b]-R.byA[a]);
   if(aids.length){h2('Saídas por conta e cartão');table([{h:'Conta ou cartão',w:345},{h:'Saídas',w:170,a:'r'}],aids.map(id=>[(S.acc[id]||{name:'Conta removida'}).name,fm(R.byA[id])]),10);}
+  {const endDate=refs[refs.length-1]+'-31';const rowsS=[];
+    S.cfg.accounts.filter(a=>a.type!=='card'&&!a.off).forEach(a=>{const x=saldoAt(a,endDate);if(x)rowsS.push([a.name,fdFull(x.d),fm(x.v)]);});
+    if(rowsS.length){h2('Saldo acumulado das contas ao fim do período');table([{h:'Conta',w:255},{h:'Data do saldo',w:110,a:'r'},{h:'Saldo',w:150,a:'r'}],rowsS,10);}}
   if(withList){const list=[];refs.forEach(r=>(S.m[r]||[]).forEach(t=>list.push(t)));list.sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:0);
     if(list.length){h2('Lançamentos ('+list.length+')');
       table([{h:'Data',w:55},{h:'Descrição',w:190},{h:'Conta',w:85},{h:'Categoria',w:100},{h:'Valor',w:85,a:'r'}],
@@ -977,6 +1032,9 @@ document.addEventListener('click',e=>{const a=e.target.closest('[data-act]');if(
     case 'dirfix':if(Dir.state==='guard'){S.tab='mais';render();}else{(async()=>{const r=await folderWrite();toast(r==='ok'?'Backup salvo na pasta.':folderMsg(r));render();})();}break;
     case 'dirrestore':(async()=>{const ex=await folderRead();if(!ex){toast('Não encontrei um backup válido nesta pasta.');return;}ask('Restaurar da pasta','Restaurar o backup com '+countTx(ex.j)+' lançamentos? O estado atual é guardado antes numa cópia.','Restaurar',()=>applyRestore(ex.j));})();break;
     case 'dirforget':(async()=>{Dir.handle=null;Dir.state='none';try{await KV.del('dir');}catch(e){}render();toast('Pasta de backup desativada.');})();break;
+    case 'saldo':openSaldo(a.dataset.id);break;
+    case 'reload':location.reload();break;
+    case 'forceupd':forceUpdate();break;
     case 'impcancel':S.imp=null;render();break;
     case 'impconfirm':doImport();break;
   }});
@@ -987,7 +1045,7 @@ document.addEventListener('change',e=>{const t=e.target;const I=S.imp;
   else if(t.id==='imp-file'){if(t.files[0])startImport(t.files[0]);}
   else if(t.id==='imp-acc'){S.impAcc=t.value;}
   else if(t.id==='m-imp'){const f=t.files[0];t.value='';if(f)importBackupFile(f);}
-  else if(I&&['imp-d','imp-s','imp-v','imp-x','imp-sign','imp-ref'].includes(t.id)){
+  else if(I&&['imp-d','imp-s','imp-v','imp-x','imp-b','imp-sign','imp-ref'].includes(t.id)){
     if(t.id==='imp-sign')I.sign=t.value;else if(t.id==='imp-ref')I.ref=t.value;
     else I.map[t.id.slice(4)]=parseInt(t.value,10);
     const ref=I.ref;buildItems();I.ref=ref;render();}

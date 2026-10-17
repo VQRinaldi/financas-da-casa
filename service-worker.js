@@ -2,7 +2,7 @@
    Guarda todos os arquivos do app para uso offline. Todos os caminhos são relativos
    à pasta onde este arquivo está (funciona em subdiretório, como no GitHub Pages).
    Para forçar a troca de versão, mude o número em VERSION. */
-const VERSION = 'v4';
+const VERSION = 'v5';
 const CACHE = 'financas-casa-' + VERSION;
 const ASSETS = [
   './',
@@ -45,7 +45,7 @@ self.addEventListener('fetch', (e) => {
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const hit = await cache.match(r, { ignoreSearch: true });
-    const net = fetch(r).then((res) => {
+    const net = fetch(r.url, { cache: 'no-cache' }).then((res) => {
       if (res && res.status === 200 && res.type === 'basic') cache.put(r, res.clone());
       return res;
     }).catch(() => null);
